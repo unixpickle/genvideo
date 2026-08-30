@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local inference runtimes, model weights, and generated media.
+ComfyUI/
+ltx-2/
+inputs/
+outputs/
+web_outputs/
+workflows/*.original.json

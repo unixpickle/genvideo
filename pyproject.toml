@@ -1,0 +1,10 @@
+[project]
+name = "genvideo"
+version = "0.1.0"
+description = "Memory-bounded LTX-2.5 image-to-video command"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.0",
+    "psutil>=7.2.2",
+]

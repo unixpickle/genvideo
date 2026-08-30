@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0b0d12">
+    <title>Genvideo Queue</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=5">
+    <script src="/assets/app.js?v=5" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <h1>Genvideo</h1>
+          <p>LTX-2.5 · private queue</p>
+        </div>
+      </div>
+      <div class="engine-pill" id="engine-pill">
+        <span class="engine-dot"></span>
+        <span id="engine-label">Idle · model unloaded</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="composer panel" aria-labelledby="create-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">New generation</p>
+            <h2 id="create-title">What should happen?</h2>
+          </div>
+          <span class="spec"><span id="duration-spec">3 sec</span> · 512²</span>
+        </div>
+
+        <form id="job-form">
+          <fieldset class="mode-switch">
+            <legend class="sr-only">Generation mode</legend>
+            <label>
+              <input type="radio" name="mode" value="text" checked>
+              <span>Text only</span>
+            </label>
+            <label>
+              <input type="radio" name="mode" value="image">
+              <span>Start with image</span>
+            </label>
+          </fieldset>
+
+          <label class="field-label" for="prompt">Prompt</label>
+          <textarea id="prompt" name="prompt" maxlength="8000" required
+            placeholder="A cinematic close-up of a glass hummingbird taking flight, its iridescent wings catching warm sunlight."></textarea>
+          <div class="prompt-meta">
+            <span id="prompt-hint">Describe the scene, motion, camera, and lighting.</span>
+            <span id="prompt-count">0 / 8000</span>
+          </div>
+
+          <div id="image-field" class="image-field" hidden>
+            <label class="field-label" for="image">Starting image</label>
+            <label class="upload-box" id="upload-box" for="image">
+              <input id="image" name="image" type="file" accept="image/*">
+              <img id="image-preview" alt="Selected starting frame" hidden>
+              <span class="upload-empty" id="upload-empty">
+                <span class="upload-icon" aria-hidden="true">＋</span>
+                <strong>Choose a photo</strong>
+                <small>Any aspect ratio · up to 32 MB</small>
+              </span>
+              <button class="change-image" id="change-image" type="button" hidden>Change</button>
+            </label>
+          </div>
+
+          <div class="duration-field">
+            <label class="field-label" for="duration">Duration</label>
+            <select id="duration" name="duration">
+              <option value="3" selected>3 seconds</option>
+              <option value="5">5 seconds</option>
+            </select>
+            <p>Five seconds uses more memory and takes longer, but fits the 56 GiB limit.</p>
+          </div>
+
+          <details class="advanced">
+            <summary>Advanced</summary>
+            <label class="field-label" for="seed">Seed <span>optional</span></label>
+            <input id="seed" name="seed" type="number" min="0" step="1"
+              placeholder="Random">
+          </details>
+
+          <div class="form-error" id="form-error" role="alert" hidden></div>
+          <button class="submit-button" id="submit-button" type="submit">
+            <span>Add to queue</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </button>
+        </form>
+      </section>
+
+      <section class="queue-section" aria-labelledby="queue-title">
+        <div class="queue-heading">
+          <div>
+            <p class="eyebrow">Global queue</p>
+            <h2 id="queue-title">Your generations</h2>
+          </div>
+          <span class="queue-count" id="queue-count">0 waiting</span>
+        </div>
+        <div id="queue" class="queue" aria-live="polite"></div>
+        <div id="empty-state" class="empty-state panel">
+          <div class="empty-orbit" aria-hidden="true"><span></span></div>
+          <h3>The queue is clear</h3>
+          <p>Add an idea above. The model loads only when there is work to do.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>LTX-2.5 22B</span>
+      <span>56 GiB safety limit</span>
+    </footer>
+  </body>
+</html>
