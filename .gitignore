@@ -15,4 +15,7 @@ ltx-2/
 inputs/
 outputs/
 web_outputs/
-workflows/*.original.json
+
+# Keep only the workflow template used by the application.
+workflows/*
+!workflows/ltx2_5_video_api.json

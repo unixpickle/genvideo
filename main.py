@@ -28,7 +28,7 @@ import psutil
 ROOT = Path(__file__).resolve().parent
 COMFY_DIR = ROOT / "ComfyUI"
 COMFY_PYTHON = ROOT / ".venv" / "bin" / "python"
-WORKFLOW_PATH = ROOT / "workflows" / "cement_frog_morph_api.json"
+WORKFLOW_PATH = ROOT / "workflows" / "ltx2_5_video_api.json"
 IMAGE_SIZE = 512
 HARD_MEMORY_CEILING_GIB = 64.0
 DEFAULT_DURATION_SECONDS = 3
