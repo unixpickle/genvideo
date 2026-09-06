@@ -7,14 +7,14 @@ from unittest import mock
 import torch
 
 from checkpoint_sampler import atomic_save, load_state, sample_resumable
-import main
+import generation
 
 
 class SamplerTests(unittest.TestCase):
     def test_resume_every_boundary_matches_comfy_multistep(self):
         # Run the installed upstream solver as the reference without importing
         # ComfyUI's model/GPU initialization into the web test process.
-        source = ast.parse((main.COMFY_DIR / "comfy/k_diffusion/sampling.py").read_text())
+        source = ast.parse((generation.COMFY_DIR / "comfy/k_diffusion/sampling.py").read_text())
         functions = []
         for node in source.body:
             if isinstance(node, ast.FunctionDef) and node.name in {
@@ -84,7 +84,7 @@ class SamplerTests(unittest.TestCase):
 
 class ResumeWorkflowTests(unittest.TestCase):
     def workflow(self, directory):
-        return main._resumable_workflow(main._workflow(
+        return generation._resumable_workflow(generation._workflow(
             image_name="input.png", prompt="A bird", seed=12), directory)
 
     def test_conditioning_restore_prunes_text_encoder_and_image(self):

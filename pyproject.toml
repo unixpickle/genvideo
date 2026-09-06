@@ -1,7 +1,7 @@
 [project]
 name = "genvideo"
 version = "0.1.0"
-description = "Memory-bounded MiniMax H3 audio-video generation"
+description = "Web app for memory-bounded MiniMax H3 audio-video generation"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

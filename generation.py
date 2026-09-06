@@ -1,8 +1,7 @@
-"""One-shot, memory-bounded MiniMax H3 audio-video generation."""
+"""Memory-bounded MiniMax H3 generation engine for the web app."""
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import math
@@ -122,118 +121,6 @@ def build_h3_prompt(
             "<Picture 1> (from [Shot 1]) is fully referenced.",
         )
     return "\n\n".join(sections)
-
-
-def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--model",
-        choices=SUPPORTED_MODELS,
-        default=DEFAULT_MODEL,
-        help="H3 generation schedule (default: minimax-h3 Turbo)",
-    )
-    parser.add_argument("--seed", type=int, help="generation seed (default: random)")
-    parser.add_argument(
-        "--duration",
-        type=int,
-        choices=SUPPORTED_DURATION_SECONDS,
-        default=DEFAULT_DURATION_SECONDS,
-        metavar="SECONDS",
-        help="video duration in seconds (3 through 15; default: 5)",
-    )
-    parser.add_argument(
-        "--resolution",
-        type=int,
-        choices=SUPPORTED_RESOLUTIONS,
-        default=DEFAULT_RESOLUTION,
-        metavar="SHORT_EDGE",
-        help="canvas resolution profile (choices: 512 or 768; default: 512)",
-    )
-    parser.add_argument(
-        "--aspect-ratio",
-        choices=SUPPORTED_ASPECT_RATIOS,
-        default=DEFAULT_ASPECT_RATIO,
-        help="output aspect ratio (default: 1:1)",
-    )
-    parser.add_argument(
-        "--overall-soundscape",
-        default="",
-        help="optional H3 ambient and physical sound description",
-    )
-    parser.add_argument(
-        "--non-diegetic-music",
-        default="",
-        help="optional H3 background-score description (use N/A for none)",
-    )
-    parser.add_argument(
-        "--memory-limit-gib",
-        type=float,
-        default=56.0,
-        metavar="GIB",
-        help="stop if process-tree RSS exceeds this value (default: 56, maximum: 64)",
-    )
-
-
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    arguments = sys.argv[1:] if argv is None else argv
-    if arguments and arguments[0] == "--text":
-        parser = argparse.ArgumentParser(
-            prog="genvideo --text",
-            description=(
-                "Generate one MiniMax H3 audio-video clip from text. All "
-                "intermediate files are temporary."
-            ),
-        )
-        parser.add_argument("prompt", help="description of the desired video")
-        parser.add_argument("output", type=Path, help="final .mp4 path")
-        _add_runtime_options(parser)
-        parsed = parser.parse_args(arguments[1:])
-        parsed.image = None
-        parsed.text_only = True
-        return parsed
-
-    parser = argparse.ArgumentParser(
-        prog="genvideo",
-        description=(
-            "Generate one MiniMax H3 audio-video clip from an image. The image is "
-            "scaled to cover the selected canvas; all intermediate files are temporary. "
-            "For generation without an image, use: genvideo --text PROMPT OUTPUT"
-        ),
-    )
-    parser.add_argument("image", type=Path, help="initial image (any dimensions)")
-    parser.add_argument("prompt", help="description of the desired motion/video")
-    parser.add_argument("output", type=Path, help="final .mp4 path")
-    _add_runtime_options(parser)
-    parsed = parser.parse_args(arguments)
-    parsed.text_only = False
-    return parsed
-
-
-def _validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
-    image = args.image.expanduser().resolve() if args.image is not None else None
-    output = args.output.expanduser().resolve()
-    if image is not None and not image.is_file():
-        raise GenerationError(f"input image does not exist: {image}")
-    if output.suffix.lower() != ".mp4":
-        raise GenerationError("output path must end in .mp4")
-    if image is not None and image == output:
-        raise GenerationError("input image and output path must be different")
-    if not args.prompt.strip():
-        raise GenerationError("prompt must not be empty")
-    if not 0 < args.memory_limit_gib <= HARD_MEMORY_CEILING_GIB:
-        raise GenerationError(
-            f"--memory-limit-gib must be greater than 0 and at most "
-            f"{HARD_MEMORY_CEILING_GIB:g}"
-        )
-    if not COMFY_PYTHON.is_file() or not (COMFY_DIR / "main.py").is_file():
-        raise GenerationError(f"ComfyUI runtime is missing from {COMFY_DIR}")
-    if args.model not in SUPPORTED_MODELS:
-        raise GenerationError(f"unsupported model: {args.model}")
-    workflow_path = WORKFLOW_PATHS[args.model]
-    if not workflow_path.is_file():
-        raise GenerationError(f"workflow template is missing: {workflow_path}")
-    if shutil.which("ffmpeg") is None:
-        raise GenerationError("ffmpeg is required but was not found on PATH")
-    return image, output
 
 
 def _prepare_image(source: Path, destination: Path, width: int, height: int) -> None:
@@ -964,39 +851,3 @@ class ComfySession:
 
 def _random_seed() -> int:
     return random.SystemRandom().randrange(1, 2**63 - 1)
-
-
-def run(args: argparse.Namespace) -> Path:
-    image, output = _validate_args(args)
-    seed = args.seed if args.seed is not None else _random_seed()
-    prompt = build_h3_prompt(
-        args.prompt,
-        args.overall_soundscape,
-        args.non_diegetic_music,
-        image_mode=image is not None,
-    )
-    with ComfySession(args.memory_limit_gib, args.model) as session:
-        return session.generate(
-            prompt,
-            output,
-            image=image,
-            seed=seed,
-            duration_seconds=args.duration,
-            model=args.model,
-            resolution=args.resolution,
-            aspect_ratio=args.aspect_ratio,
-        )
-
-
-def main() -> None:
-    try:
-        output = run(_parse_args())
-    except (GenerationError, OSError, KeyboardInterrupt) as exc:
-        message = str(exc) if str(exc) else "interrupted"
-        print(f"genvideo: error: {message}", file=sys.stderr)
-        raise SystemExit(1) from None
-    print(output)
-
-
-if __name__ == "__main__":
-    main()

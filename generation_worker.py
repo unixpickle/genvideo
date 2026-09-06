@@ -6,7 +6,7 @@ import signal
 import sys
 import threading
 
-from main import ComfySession
+from generation import ComfySession
 
 
 def write_json(path, value):

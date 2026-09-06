@@ -10,7 +10,7 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-import main
+import generation
 import web as queue_web
 
 
@@ -88,7 +88,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         await server.start_server()
         try:
             events = []
-            await main._progress_listener(str(server.make_url("/")).rstrip("/"), "test",
+            await generation._progress_listener(str(server.make_url("/")).rstrip("/"), "test",
                                           {"11": "Diffusion"}, set(), threading.Event(),
                                           threading.Event(), events.append)
             self.assertEqual(events, [{"stage": "Diffusion", "step": None, "total": None},

@@ -1,11 +1,11 @@
 import unittest
 
-import main
+import generation
 
 
 class H3PromptTests(unittest.TestCase):
     def test_serializes_only_present_fields_in_official_order(self):
-        prompt = main.build_h3_prompt(
+        prompt = generation.build_h3_prompt(
             "[Shot 1] A glass bird takes flight.",
             non_diegetic_music="N/A",
         )
@@ -16,7 +16,7 @@ class H3PromptTests(unittest.TestCase):
         )
 
     def test_image_mode_adds_first_frame_alignment(self):
-        prompt = main.build_h3_prompt("The subject turns.", image_mode=True)
+        prompt = generation.build_h3_prompt("The subject turns.", image_mode=True)
         self.assertTrue(
             prompt.startswith(
                 "For the target video, at 0.00 seconds into the target video, "
@@ -25,8 +25,8 @@ class H3PromptTests(unittest.TestCase):
         )
 
     def test_requires_one_field(self):
-        with self.assertRaisesRegex(main.GenerationError, "at least one"):
-            main.build_h3_prompt()
+        with self.assertRaisesRegex(generation.GenerationError, "at least one"):
+            generation.build_h3_prompt()
 
 
 class CanvasTests(unittest.TestCase):
@@ -48,19 +48,19 @@ class CanvasTests(unittest.TestCase):
             "9:16": (768, 1344),
         }
         self.assertEqual(
-            {ratio: main.canvas_dimensions(512, ratio) for ratio in expected_512},
+            {ratio: generation.canvas_dimensions(512, ratio) for ratio in expected_512},
             expected_512,
         )
         self.assertEqual(
-            {ratio: main.canvas_dimensions(768, ratio) for ratio in expected_768},
+            {ratio: generation.canvas_dimensions(768, ratio) for ratio in expected_768},
             expected_768,
         )
 
 
 class WorkflowTests(unittest.TestCase):
     def test_workflow_applies_duration_canvas_and_text_mode(self):
-        prompt = main.build_h3_prompt("[Shot 1] A glass bird takes flight.")
-        workflow = main._workflow(
+        prompt = generation.build_h3_prompt("[Shot 1] A glass bird takes flight.")
+        workflow = generation._workflow(
             image_name=None,
             prompt=prompt,
             seed=123,

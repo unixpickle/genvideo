@@ -1,111 +1,47 @@
 # genvideo
 
-Generate MiniMax H3 video with synchronized stereo audio while keeping all
-working files temporary. Image inputs may have any dimensions; they are scaled
-to cover the selected output canvas and center-cropped without distortion.
-Only the requested MP4 remains.
+A private, mobile-friendly web app for generating MiniMax H3 video with
+synchronized stereo audio. Create text-to-video or image-plus-text jobs, manage
+the generation queue, and play finished videos inline.
 
-```sh
-./genvideo input.jpg "The subject comes alive and looks around" output.mp4
-```
-
-For text-to-video generation without an initial image:
-
-```sh
-./genvideo --text "A tiny sailboat crossing a stormy teacup" output.mp4
-```
-
-Turbo is the default. Use `--model minimax-h3-base` for the regular 20-step
-schedule without the 4-step Turbo LoRA:
-
-```sh
-./genvideo --text "A sailboat crossing a stormy teacup." output.mp4 \
-  --overall-soundscape "Rain, rolling thunder, and tiny waves." \
-  --non-diegetic-music "Sparse low strings at a slow tempo."
-```
-
-The positional prompt becomes H3's `integrated_multimodal_description`. The two
-audio options are optional, and empty fields are omitted. Fields are serialized
-in H3's required order:
-
-```text
-integrated_multimodal_description: ...
-
-overall_soundscape: ...
-
-non_diegetic_music: ...
-```
-
-For image-to-video jobs, genvideo automatically prepends H3's required
-`<Picture 1>` instruction aligning the supplied image with the first frame.
-
-The local stack uses a 10.6 GB Q4 GGUF of the H3 hybrid FL2VA/REF2VA
-checkpoint, an NVFP4 Qwen3-VL encoder, and a 4-step Turbo LoRA. Its weights are
-stored outside the repository under
-`/Volumes/MLData3/genvideo/ComfyUI/models/` and linked into the matching
-ComfyUI model directories.
-
-On Apple Silicon, the isolated ComfyUI process enables PyTorch's CPU fallback
-for operations that MPS does not implement. Model sampling still uses MPS.
-
-The MiniMax H3 installation consists of:
-
-```text
-unet/minimax_h3_hybrid_fl2va_ref2va_b25-49-Q4_0.gguf
-text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
-vae/minimax_h3_video_vae_fp16.safetensors
-vae/minimax_h3_audio_vae_fp32.safetensors
-loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors
-```
-
-Use `--seed NUMBER` for a repeatable generation. The command launches its own
-local ComfyUI instance with low-memory settings and stops if its process tree
-reaches 56 GiB RSS. A lower limit can be selected with
-`--memory-limit-gib GIB`; values above 64 are rejected.
-It also preserves an 8 GiB system-memory reserve and stops if a generation
-grows swap usage by more than 4 GiB.
-MiniMax H3 uses ComfyUI's dynamic low-memory loading and keeps offloaded model
-weights disk-backed instead of pinning another copy in unified memory.
-Its pipeline-specific conditioning node releases the 32B text encoder before
-the diffusion transformer is loaded, avoiding both checkpoints occupying RAM
-at the same time.
-
-Videos are 5 seconds by default. Every integer duration from 3 through 15
-seconds is available (3 seconds is retained as a compatibility option); H3
-snaps the requested duration to its `17k+5` frame grid at 24 fps:
-
-```sh
-./genvideo --duration 15 input.jpg "The subject keeps moving" output.mp4
-```
-
-Choose a 512p memory-saving or native 768p canvas, plus any supported aspect
-ratio. Canvases are aligned to 32 pixels and capped to H3's local 7:4 pixel
-budget, so the exact dimensions are shown by the website.
-
-```sh
-./genvideo --text "A crane crosses the skyline." output.mp4 \
-  --resolution 768 --aspect-ratio 9:16
-```
-
-Supported aspect ratios are `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, and `9:16`.
-
-## Queue website
-
-Start the private, mobile-friendly queue server with:
+## Start the web app
 
 ```sh
 ./genvideo-web
 ```
 
-Then open [http://10.9.0.8:8080](http://10.9.0.8:8080). The page accepts both
-text-to-video prompts and image-plus-text jobs, exposes all three H3 structured
-prompt fields, offers 3–15-second durations and canvas controls, shows the full
-compiled prompt and starting image for every job, and plays finished videos
-inline. **Copy to form** loads any current or historical job's prompt fields,
-output settings, exact seed, and starting image into the composer for editing.
-Submitting creates a separate job. Older LTX prompts can also be copied into
-an H3 form; their model selection defaults to H3 Turbo.
-Completed MP4s are stored in `web_outputs/`.
+Then open [http://10.9.0.8:8080](http://10.9.0.8:8080). The server accepts
+`--host`, `--port`, `--output-directory`, and `--memory-limit-gib` options.
+Completed MP4s and queue state are stored in `web_outputs/` by default.
+
+## Create a generation
+
+Choose **Text only** or **Start with image**, then fill at least one H3 prompt
+field: integrated multimodal description, overall soundscape, or non-diegetic
+music. Empty fields are omitted, and the app serializes the fields in H3's
+required order. Image jobs automatically prepend the `<Picture 1>` instruction
+aligning the supplied image with the first frame. Images may have any
+dimensions; they are scaled to cover the output canvas and center-cropped
+without distortion.
+
+MiniMax H3 Turbo is the default, using the 4-step Turbo LoRA. Select
+**MiniMax H3 Regular (20 steps)** for the regular schedule without the LoRA.
+Set a seed for repeatable generation.
+
+Videos default to 5 seconds. Every integer duration from 3 through 15 seconds
+is available (3 seconds is retained as a compatibility option); H3 snaps the
+requested duration to its `17k+5` frame grid at 24 fps. Choose a 512p
+memory-saving or native 768p canvas and an aspect ratio of `21:9`, `16:9`,
+`4:3`, `1:1`, `3:4`, or `9:16`. Canvases are aligned to 32 pixels and capped
+to H3's local 7:4 pixel budget; the app shows the exact dimensions.
+
+Every job shows its full compiled prompt and starting image. **Copy to form**
+loads any current or historical job's prompt fields, output settings, exact
+seed, and starting image into the composer for editing. Submitting creates a
+separate job. Older LTX prompts can also be copied into an H3 form; their model
+selection defaults to H3 Turbo.
+
+## Manage the queue
 
 Queue / Generations tabs switch between pending jobs and past generations on
 desktop and mobile. The running job is highlighted and shows live stage progress.
@@ -144,6 +80,40 @@ are migrated automatically; jobs that predate checkpoint support start from
 scratch. Checkpoints are PyTorch files tied to this pipeline and model
 installation. Completed jobs automatically discard their checkpoints. Uploaded images remain available
 until the corresponding job is removed.
+
+## Local inference runtime
+
+The local stack uses a 10.6 GB Q4 GGUF of the H3 hybrid FL2VA/REF2VA
+checkpoint, an NVFP4 Qwen3-VL encoder, and a 4-step Turbo LoRA. Its weights are
+stored outside the repository under
+`/Volumes/MLData3/genvideo/ComfyUI/models/` and linked into the matching
+ComfyUI model directories.
+
+On Apple Silicon, the isolated ComfyUI process enables PyTorch's CPU fallback
+for operations that MPS does not implement. Model sampling still uses MPS.
+
+The MiniMax H3 installation consists of:
+
+```text
+unet/minimax_h3_hybrid_fl2va_ref2va_b25-49-Q4_0.gguf
+text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+vae/minimax_h3_video_vae_fp16.safetensors
+vae/minimax_h3_audio_vae_fp32.safetensors
+loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors
+```
+
+Each job launches its own local ComfyUI instance with low-memory settings and
+stops if its process tree reaches 56 GiB RSS. Set the web server's
+`--memory-limit-gib GIB` option to adjust the limit; values above 64 are rejected.
+The worker also preserves an 8 GiB system-memory reserve and stops if a
+generation grows swap usage by more than 4 GiB.
+MiniMax H3 uses ComfyUI's dynamic low-memory loading and keeps offloaded model
+weights disk-backed instead of pinning another copy in unified memory.
+Its pipeline-specific conditioning node releases the 32B text encoder before
+the diffusion transformer is loaded, avoiding both checkpoints occupying RAM
+at the same time.
+
+## Tests
 
 Run the tests with the installed inference environment:
 

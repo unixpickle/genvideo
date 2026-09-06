@@ -19,7 +19,7 @@ from typing import Any
 
 from aiohttp import web
 
-from main import (
+from generation import (
     DEFAULT_ASPECT_RATIO,
     DEFAULT_MODEL,
     DEFAULT_DURATION_SECONDS,
