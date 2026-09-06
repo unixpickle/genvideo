@@ -144,11 +144,21 @@ select { appearance: auto; }
 textarea:focus, input[type="number"]:focus, select:focus { border-color: rgba(183,255,86,.7); box-shadow: 0 0 0 3px rgba(183,255,86,.09); }
 textarea::placeholder, input::placeholder { color: #596172; }
 .prompt-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; color: var(--muted); font-size: 11px; }
-#prompt-count { white-space: nowrap; }
+.field-count { white-space: nowrap; }
 
 .image-field { margin-top: 20px; }
-.duration-field { margin-top: 20px; }
-.duration-field p { margin: 7px 1px 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.model-field { margin-bottom: 20px; }
+.model-field p { margin: 7px 1px 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.structured-fields { margin-top: 22px; padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: rgba(8, 10, 15, .3); }
+.structured-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 17px; }
+.structured-heading h3 { margin: 0; font-size: 16px; }
+.structured-heading > span { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.structured-fields textarea { min-height: 88px; }
+.structured-fields .field-label:not(:first-of-type) { margin-top: 18px; }
+.structured-note { margin: 17px 0 0; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.5; }
+.structured-note code { color: #dce0e7; }
+.output-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 22px; }
+.output-fields > p { grid-column: 1 / -1; margin: -4px 1px 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .upload-box {
   position: relative;
   min-height: 176px;
@@ -194,9 +204,14 @@ textarea::placeholder, input::placeholder { color: #596172; }
 
 .queue-section { margin-top: 42px; }
 .queue-heading { margin: 0 2px 16px; }
-.queue-count { padding: 6px 9px; border-radius: 999px; color: var(--muted); background: var(--panel); font-size: 11px; }
+.queue-count { padding: 6px 9px; border-radius: 999px; color: var(--muted); background: var(--panel); font-size: 11px; line-height: 1.5; text-align: right; }
 .queue { display: grid; gap: 12px; }
 .job { padding: 16px; }
+.job[data-status="running"] { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent), 0 0 24px rgba(183, 255, 86, .08); }
+.job-state { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.job-state-description { flex: 1 1 200px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.job[data-status="running"] .job-state-description, .job[data-status="running"] .progress-label { color: var(--accent); }
+.status.running::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: currentColor; animation: pulse 1s infinite alternate; }
 .job-top { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
 .job-mode { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .job-top > div { min-width: 0; flex: 1 1 0; }
@@ -257,7 +272,11 @@ footer { width: min(100% - 32px, 760px); margin: 0 auto; padding: 0 0 max(28px, 
   .section-heading { align-items: start; }
   .spec { padding-top: 4px; }
   form { margin-top: 20px; }
-  .prompt-meta #prompt-hint { max-width: 230px; }
+  .prompt-meta > span:first-child { max-width: 230px; }
+  .structured-fields { padding: 14px; }
+  .structured-heading { align-items: start; }
+  .output-fields { grid-template-columns: 1fr; gap: 16px; }
+  .output-fields > p { grid-column: auto; }
   .queue-section { margin-top: 36px; }
   .job { padding: 14px; }
   .running-line { margin: 15px -14px -14px; }
@@ -265,4 +284,37 @@ footer { width: min(100% - 32px, 760px); margin: 0 auto; padding: 0 0 max(28px, 
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+
+/* One document scroll: panels grow naturally and never cover their neighbors. */
+main { width: min(100% - 32px, 1240px); display: grid; grid-template-columns: minmax(0, 460px) minmax(0, 1fr); gap: 28px; align-items: start; }
+.composer, .activity, .queue, .job { min-width: 0; }
+.activity .queue-section { margin-top: 0; }
+.history-section { margin-top: 0; }
+.activity-tabs { display: flex; gap: 6px; padding: 5px; margin-bottom: 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg); }
+.activity-tabs button { flex: 1; min-height: 44px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; }
+.activity-tabs button[aria-selected="true"] { color: var(--accent); background: var(--panel-raised); }
+.activity-tabs span { margin-left: 6px; font-size: 12px; }
+.activity[data-tab="queue"] #history-panel, .activity[data-tab="history"] #queue-panel { display: none; }
+.priority-field { margin-top: 20px; }
+.priority-field p { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.job-priority { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.job-priority select { width: auto; height: 40px; font-size: 12px; padding: 0 8px; border-radius: 11px; }
+.job-progress { margin-top: 16px; }
+.progress-label { margin: 0 0 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+progress { display: block; width: 100%; height: 7px; accent-color: var(--accent); }
+.status.paused { color: #ffd36a; background: #352b17; }
+.job video { aspect-ratio: auto; max-height: 640px; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.mode-switch input:focus-visible + span { outline: 2px solid var(--accent); }
+@media (max-width: 900px) {
+  main { display: block; width: min(100% - 24px, 760px); }
+  .activity { margin-top: 32px; }
+}
+@media (max-width: 560px) {
+  .job-top { flex-wrap: wrap; }
+  .job-top > div { flex-basis: 100%; }
+  .structured-heading { flex-wrap: wrap; }
+  .section-heading { flex-wrap: wrap; }
+  .job-actions a, .job-actions button, .job-priority select { min-height: 44px; }
 }

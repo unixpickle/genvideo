@@ -1,0 +1,3 @@
+genvideo:
+  base_path: .
+  custom_nodes: custom_nodes

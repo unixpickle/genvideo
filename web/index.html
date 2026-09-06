@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#0b0d12">
     <title>Genvideo Queue</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=5">
-    <script src="/assets/app.js?v=5" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=9">
+    <script src="/assets/app.js?v=9" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -14,7 +14,7 @@
         <div class="mark" aria-hidden="true"></div>
         <div>
           <h1>Genvideo</h1>
-          <p>LTX-2.5 · private queue</p>
+          <p>MiniMax H3 · private queue</p>
         </div>
       </div>
       <div class="engine-pill" id="engine-pill">
@@ -30,7 +30,7 @@
             <p class="eyebrow">New generation</p>
             <h2 id="create-title">What should happen?</h2>
           </div>
-          <span class="spec"><span id="duration-spec">3 sec</span> · 512²</span>
+          <span class="spec"><span id="duration-spec">5 sec</span> · <span id="canvas-spec">512×512</span></span>
         </div>
 
         <form id="job-form">
@@ -46,12 +46,49 @@
             </label>
           </fieldset>
 
-          <label class="field-label" for="prompt">Prompt</label>
-          <textarea id="prompt" name="prompt" maxlength="8000" required
-            placeholder="A cinematic close-up of a glass hummingbird taking flight, its iridescent wings catching warm sunlight."></textarea>
+          <div class="model-field">
+            <label class="field-label" for="model">Model</label>
+            <select id="model" name="model">
+              <option value="minimax-h3" selected>MiniMax H3 Turbo (4 steps)</option>
+              <option value="minimax-h3-base">MiniMax H3 Regular (20 steps)</option>
+            </select>
+            <p id="model-hint">H3 with the 4-step Turbo LoRA and native stereo audio.</p>
+          </div>
+
+          <label class="field-label" for="integrated-multimodal-description">Integrated multimodal description <span>optional</span></label>
+          <textarea id="integrated-multimodal-description" name="integrated_multimodal_description" maxlength="8000"
+            placeholder="[Shot 1] Live-action, a close shot frames a glass hummingbird as it takes flight..."></textarea>
           <div class="prompt-meta">
-            <span id="prompt-hint">Describe the scene, motion, camera, and lighting.</span>
-            <span id="prompt-count">0 / 8000</span>
+            <span>Visual style, shots, subjects, actions, camera, dialogue, and synchronized diegetic audio.</span>
+            <span class="field-count">0 / 8000</span>
+          </div>
+
+          <div class="structured-fields">
+            <div class="structured-heading">
+              <div>
+                <p class="eyebrow">H3 structured prompt</p>
+                <h3>Optional audio fields</h3>
+              </div>
+              <span>Empty fields are omitted</span>
+            </div>
+
+            <label class="field-label" for="overall-soundscape">Overall soundscape <span>optional</span></label>
+            <textarea id="overall-soundscape" name="overall_soundscape" maxlength="8000"
+              placeholder="Soft wingbeats and delicate glass chimes over quiet room ambience."></textarea>
+            <div class="prompt-meta">
+              <span>Ambient sound, physical action sounds, and non-verbal human sounds.</span>
+              <span class="field-count">0 / 8000</span>
+            </div>
+
+            <label class="field-label" for="non-diegetic-music">Non-diegetic music <span>optional</span></label>
+            <textarea id="non-diegetic-music" name="non_diegetic_music" maxlength="8000"
+              placeholder="Sparse celesta notes at a slow tempo, fading out at the end. Use N/A for no score."></textarea>
+            <div class="prompt-meta">
+              <span>Background score only; music audible to characters belongs in the description above.</span>
+              <span class="field-count">0 / 8000</span>
+            </div>
+
+            <p class="structured-note">Fill at least one prompt field. Fields are serialized in H3's required order. Image mode automatically inserts and maintains the <code>&lt;Picture 1&gt;</code> first-frame alignment instruction.</p>
           </div>
 
           <div id="image-field" class="image-field" hidden>
@@ -68,13 +105,54 @@
             </label>
           </div>
 
-          <div class="duration-field">
-            <label class="field-label" for="duration">Duration</label>
-            <select id="duration" name="duration">
-              <option value="3" selected>3 seconds</option>
-              <option value="5">5 seconds</option>
+          <div class="output-fields">
+            <div class="duration-field">
+              <label class="field-label" for="duration">Duration</label>
+              <select id="duration" name="duration">
+                <option value="3">3 seconds · compatibility</option>
+                <option value="4">4 seconds</option>
+                <option value="5" selected>5 seconds</option>
+                <option value="6">6 seconds</option>
+                <option value="7">7 seconds</option>
+                <option value="8">8 seconds</option>
+                <option value="9">9 seconds</option>
+                <option value="10">10 seconds</option>
+                <option value="11">11 seconds</option>
+                <option value="12">12 seconds</option>
+                <option value="13">13 seconds</option>
+                <option value="14">14 seconds</option>
+                <option value="15">15 seconds</option>
+              </select>
+            </div>
+            <div class="resolution-field">
+              <label class="field-label" for="resolution">Resolution</label>
+              <select id="resolution" name="resolution">
+                <option value="512" selected>512p · lower memory</option>
+                <option value="768">768p · native H3</option>
+              </select>
+            </div>
+            <div class="aspect-field">
+              <label class="field-label" for="aspect-ratio">Aspect ratio</label>
+              <select id="aspect-ratio" name="aspect_ratio">
+                <option value="21:9">21:9 · ultrawide</option>
+                <option value="16:9">16:9 · landscape</option>
+                <option value="4:3">4:3 · classic</option>
+                <option value="1:1" selected>1:1 · square</option>
+                <option value="3:4">3:4 · portrait</option>
+                <option value="9:16">9:16 · vertical</option>
+              </select>
+            </div>
+            <p>Longer, larger, or wider videos use substantially more memory. The 56 GiB safety limit always applies.</p>
+          </div>
+
+          <div class="priority-field">
+            <label class="field-label" for="priority">Priority</label>
+            <select id="priority" name="priority">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
             </select>
-            <p>Five seconds uses more memory and takes longer, but fits the 56 GiB limit.</p>
+            <p>Higher priority jobs interrupt lower priority jobs. Saved work resumes afterward.</p>
           </div>
 
           <details class="advanced">
@@ -92,13 +170,18 @@
         </form>
       </section>
 
-      <section class="queue-section" aria-labelledby="queue-title">
+      <div class="activity" data-tab="queue">
+        <div class="activity-tabs" role="tablist" aria-label="Generations">
+          <button id="queue-tab" type="button" role="tab" aria-selected="true" aria-controls="queue-panel">Queue <span id="queue-tab-count">0</span></button>
+          <button id="history-tab" type="button" role="tab" aria-selected="false" aria-controls="history-panel" tabindex="-1">Generations <span id="history-tab-count">0</span></button>
+        </div>
+      <section id="queue-panel" class="queue-section" aria-labelledby="queue-title">
         <div class="queue-heading">
           <div>
             <p class="eyebrow">Global queue</p>
-            <h2 id="queue-title">Your generations</h2>
+            <h2 id="queue-title">Queue</h2>
           </div>
-          <span class="queue-count" id="queue-count">0 waiting</span>
+          <span class="queue-count" id="queue-count">0 running · 0 waiting · 0 paused</span>
         </div>
         <div id="queue" class="queue" aria-live="polite"></div>
         <div id="empty-state" class="empty-state panel">
@@ -107,10 +190,21 @@
           <p>Add an idea above. The model loads only when there is work to do.</p>
         </div>
       </section>
+      <section id="history-panel" class="history-section" aria-labelledby="history-title">
+        <div class="queue-heading">
+          <div><p class="eyebrow">Past generations</p><h2 id="history-title">Generations</h2></div>
+          <span class="queue-count" id="history-count">0 jobs</span>
+        </div>
+        <div id="history" class="queue"></div>
+        <div id="history-empty" class="empty-state panel">
+          <h3>No generations yet</h3><p>Completed and failed generations will appear here.</p>
+        </div>
+      </section>
+      </div>
     </main>
 
     <footer>
-      <span>LTX-2.5 22B</span>
+      <span>MiniMax H3 · native stereo audio</span>
       <span>56 GiB safety limit</span>
     </footer>
   </body>

@@ -1,0 +1,140 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "minimax_h3_hybrid_fl2va_ref2va_b25-49-Q4_0.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {"title": "Load MiniMax H3"}
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {"title": "Load MiniMax H3 Text Encoder"}
+  },
+  "3": {
+    "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"},
+    "class_type": "VAELoader",
+    "_meta": {"title": "Load MiniMax H3 Video VAE"}
+  },
+  "4": {
+    "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"},
+    "class_type": "VAELoader",
+    "_meta": {"title": "Load MiniMax H3 Audio VAE"}
+  },
+  "5": {
+    "inputs": {"image": "input.png"},
+    "class_type": "LoadImage",
+    "_meta": {"title": "Load First Frame"}
+  },
+  "6": {
+    "inputs": {
+      "clip": ["2", 0],
+      "vae": ["3", 0],
+      "first_frame": ["5", 0],
+      "prompt": ["16", 0],
+      "width": 512,
+      "height": 512,
+      "length": ["18", 1]
+    },
+    "class_type": "GenVideoMiniMaxH3Conditioning",
+    "_meta": {"title": "MiniMax H3 Conditioning"}
+  },
+  "7": {
+    "inputs": {"noise_seed": 84931242},
+    "class_type": "RandomNoise",
+    "_meta": {"title": "Random Noise"}
+  },
+  "8": {
+    "inputs": {"sampler_name": "res_multistep"},
+    "class_type": "KSamplerSelect",
+    "_meta": {"title": "Sampler"}
+  },
+  "9": {
+    "inputs": {
+      "model": ["19", 0],
+      "scheduler": "simple",
+      "steps": 4,
+      "denoise": 1.0
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {"title": "Schedule"}
+  },
+  "10": {
+    "inputs": {"model": ["19", 0], "conditioning": ["6", 0]},
+    "class_type": "BasicGuider",
+    "_meta": {"title": "Guider"}
+  },
+  "11": {
+    "inputs": {
+      "noise": ["7", 0],
+      "guider": ["10", 0],
+      "sampler": ["8", 0],
+      "sigmas": ["9", 0],
+      "latent_image": ["6", 1]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {"title": "Generate MiniMax H3 Video"}
+  },
+  "12": {
+    "inputs": {"samples": ["11", 0], "vae": ["3", 0]},
+    "class_type": "VAEDecode",
+    "_meta": {"title": "Decode Video"}
+  },
+  "13": {
+    "inputs": {"samples": ["11", 0], "vae": ["4", 0]},
+    "class_type": "VAEDecodeAudio",
+    "_meta": {"title": "Decode Audio"}
+  },
+  "14": {
+    "inputs": {
+      "images": ["12", 0],
+      "audio": ["13", 0],
+      "fps": 24,
+      "bit_depth": 8,
+      "color_space": "sRGB"
+    },
+    "class_type": "CreateVideo",
+    "_meta": {"title": "Create Video"}
+  },
+  "15": {
+    "inputs": {
+      "video": ["14", 0],
+      "filename_prefix": "genvideo",
+      "format": "auto",
+      "format.codec": "auto"
+    },
+    "class_type": "SaveVideo",
+    "_meta": {"title": "Save Video"}
+  },
+  "16": {
+    "inputs": {"value": "The subject moves naturally."},
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {"title": "Prompt"}
+  },
+  "17": {
+    "inputs": {"value": 3},
+    "class_type": "PrimitiveInt",
+    "_meta": {"title": "Duration"}
+  },
+  "18": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": ["17", 0]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {"title": "Duration to MiniMax H3 Frames"}
+  },
+  "19": {
+    "inputs": {
+      "model": ["1", 0],
+      "lora_name": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "strength_model": 1.0
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {"title": "Load MiniMax H3 4-Step Turbo LoRA"}
+  }
+}

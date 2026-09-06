@@ -11,11 +11,12 @@ wheels/
 
 # Local inference runtimes, model weights, and generated media.
 ComfyUI/
+custom_nodes/__pycache__/
 ltx-2/
 inputs/
 outputs/
 web_outputs/
 
-# Keep only the workflow template used by the application.
+# Keep only the workflow templates used by the application.
 workflows/*
-!workflows/ltx2_5_video_api.json
+!workflows/minimax_h3_video_api.json

@@ -1,10 +1,11 @@
-"""One-shot, memory-bounded LTX-2.5 image-to-video generation."""
+"""One-shot, memory-bounded MiniMax H3 audio-video generation."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import math
 import os
 import random
 import shutil
@@ -19,7 +20,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 import psutil
@@ -28,24 +29,40 @@ import psutil
 ROOT = Path(__file__).resolve().parent
 COMFY_DIR = ROOT / "ComfyUI"
 COMFY_PYTHON = ROOT / ".venv" / "bin" / "python"
-WORKFLOW_PATH = ROOT / "workflows" / "ltx2_5_video_api.json"
-IMAGE_SIZE = 512
+DEFAULT_MODEL = "minimax-h3"
+SUPPORTED_MODELS = ("minimax-h3", "minimax-h3-base")
+MODEL_LABELS = {
+    "minimax-h3": "MiniMax H3 Turbo",
+    "minimax-h3-base": "MiniMax H3 Regular",
+}
+WORKFLOW_PATHS = {
+    "minimax-h3": ROOT / "workflows" / "minimax_h3_video_api.json",
+    "minimax-h3-base": ROOT / "workflows" / "minimax_h3_video_api.json",
+}
 HARD_MEMORY_CEILING_GIB = 64.0
-DEFAULT_DURATION_SECONDS = 3
-SUPPORTED_DURATION_SECONDS = (3, 5)
+MAX_SWAP_GROWTH_GIB = 4.0
+MIN_SYSTEM_AVAILABLE_GIB = 8.0
+DEFAULT_DURATION_SECONDS = 5
+SUPPORTED_DURATION_SECONDS = tuple(range(3, 16))
+DEFAULT_RESOLUTION = 512
+SUPPORTED_RESOLUTIONS = (512, 768)
+DEFAULT_ASPECT_RATIO = "1:1"
+SUPPORTED_ASPECT_RATIOS = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
+CANVAS_MULTIPLE = 32
+MAX_CANVAS_ASPECT = 7 / 4
 PROGRESS_NODE_CLASSES = {
     "CLIPLoader",
-    "CLIPTextEncode",
     "CreateVideo",
-    "LatentUpscaleModelLoader",
-    "LTXVAudioVAEDecode",
-    "LTXVLatentUpsampler",
+    "LoraLoaderModelOnly",
+    "GenVideoMiniMaxH3Conditioning",
+    "GenVideoLoadConditioning",
+    "GenVideoLoadLatent",
+    "GenVideoResumableSampler",
     "SamplerCustomAdvanced",
     "SaveVideo",
-    "UNETLoader",
     "UnetLoaderGGUF",
     "VAEDecode",
-    "VAEDecodeTiled",
+    "VAEDecodeAudio",
     "VAELoader",
 }
 
@@ -54,7 +71,66 @@ class GenerationError(RuntimeError):
     pass
 
 
+def canvas_dimensions(resolution: int, aspect_ratio: str) -> tuple[int, int]:
+    """Return an H3 canvas aligned to 32 pixels and its local area cap."""
+    if resolution not in SUPPORTED_RESOLUTIONS:
+        raise GenerationError(f"unsupported resolution: {resolution}p")
+    if aspect_ratio not in SUPPORTED_ASPECT_RATIOS:
+        raise GenerationError(f"unsupported aspect ratio: {aspect_ratio}")
+    ratio_width, ratio_height = (int(value) for value in aspect_ratio.split(":"))
+    ratio = ratio_width / ratio_height
+    if ratio >= 1:
+        nominal_width, nominal_height = resolution * ratio, float(resolution)
+    else:
+        nominal_width, nominal_height = float(resolution), resolution / ratio
+    max_pixels = resolution * resolution * MAX_CANVAS_ASPECT
+    if nominal_width * nominal_height > max_pixels:
+        scale = math.sqrt(max_pixels / (nominal_width * nominal_height))
+        nominal_width *= scale
+        nominal_height *= scale
+    width = max(
+        CANVAS_MULTIPLE,
+        round(nominal_width / CANVAS_MULTIPLE) * CANVAS_MULTIPLE,
+    )
+    height = max(
+        CANVAS_MULTIPLE,
+        round(nominal_height / CANVAS_MULTIPLE) * CANVAS_MULTIPLE,
+    )
+    return width, height
+
+
+def build_h3_prompt(
+    integrated_multimodal_description: str = "",
+    overall_soundscape: str = "",
+    non_diegetic_music: str = "",
+    *,
+    image_mode: bool = False,
+) -> str:
+    """Serialize the optional H3 base prompt fields in their official order."""
+    fields = (
+        ("integrated_multimodal_description", integrated_multimodal_description),
+        ("overall_soundscape", overall_soundscape),
+        ("non_diegetic_music", non_diegetic_music),
+    )
+    sections = [f"{name}: {value.strip()}" for name, value in fields if value.strip()]
+    if not sections:
+        raise GenerationError("at least one H3 prompt field is required")
+    if image_mode:
+        sections.insert(
+            0,
+            "For the target video, at 0.00 seconds into the target video, "
+            "<Picture 1> (from [Shot 1]) is fully referenced.",
+        )
+    return "\n\n".join(sections)
+
+
 def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--model",
+        choices=SUPPORTED_MODELS,
+        default=DEFAULT_MODEL,
+        help="H3 generation schedule (default: minimax-h3 Turbo)",
+    )
     parser.add_argument("--seed", type=int, help="generation seed (default: random)")
     parser.add_argument(
         "--duration",
@@ -62,7 +138,31 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
         choices=SUPPORTED_DURATION_SECONDS,
         default=DEFAULT_DURATION_SECONDS,
         metavar="SECONDS",
-        help="video duration in seconds (choices: 3 or 5; default: 3)",
+        help="video duration in seconds (3 through 15; default: 5)",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        choices=SUPPORTED_RESOLUTIONS,
+        default=DEFAULT_RESOLUTION,
+        metavar="SHORT_EDGE",
+        help="canvas resolution profile (choices: 512 or 768; default: 512)",
+    )
+    parser.add_argument(
+        "--aspect-ratio",
+        choices=SUPPORTED_ASPECT_RATIOS,
+        default=DEFAULT_ASPECT_RATIO,
+        help="output aspect ratio (default: 1:1)",
+    )
+    parser.add_argument(
+        "--overall-soundscape",
+        default="",
+        help="optional H3 ambient and physical sound description",
+    )
+    parser.add_argument(
+        "--non-diegetic-music",
+        default="",
+        help="optional H3 background-score description (use N/A for none)",
     )
     parser.add_argument(
         "--memory-limit-gib",
@@ -79,7 +179,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser = argparse.ArgumentParser(
             prog="genvideo --text",
             description=(
-                "Generate one 512x512 LTX-2.5 video from a text prompt. All "
+                "Generate one MiniMax H3 audio-video clip from text. All "
                 "intermediate files are temporary."
             ),
         )
@@ -94,8 +194,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="genvideo",
         description=(
-            "Generate one 512x512 LTX-2.5 video from an image. The image is "
-            "scaled to cover and center-cropped; all intermediate files are temporary. "
+            "Generate one MiniMax H3 audio-video clip from an image. The image is "
+            "scaled to cover the selected canvas; all intermediate files are temporary. "
             "For generation without an image, use: genvideo --text PROMPT OUTPUT"
         ),
     )
@@ -126,14 +226,17 @@ def _validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
         )
     if not COMFY_PYTHON.is_file() or not (COMFY_DIR / "main.py").is_file():
         raise GenerationError(f"ComfyUI runtime is missing from {COMFY_DIR}")
-    if not WORKFLOW_PATH.is_file():
-        raise GenerationError(f"workflow template is missing: {WORKFLOW_PATH}")
+    if args.model not in SUPPORTED_MODELS:
+        raise GenerationError(f"unsupported model: {args.model}")
+    workflow_path = WORKFLOW_PATHS[args.model]
+    if not workflow_path.is_file():
+        raise GenerationError(f"workflow template is missing: {workflow_path}")
     if shutil.which("ffmpeg") is None:
         raise GenerationError("ffmpeg is required but was not found on PATH")
     return image, output
 
 
-def _prepare_image(source: Path, destination: Path) -> None:
+def _prepare_image(source: Path, destination: Path, width: int, height: int) -> None:
     """Scale to cover, center-crop, and discard alpha in one ffmpeg pass."""
     command = [
         "ffmpeg",
@@ -145,8 +248,8 @@ def _prepare_image(source: Path, destination: Path) -> None:
         str(source),
         "-vf",
         (
-            f"scale={IMAGE_SIZE}:{IMAGE_SIZE}:force_original_aspect_ratio=increase,"
-            f"crop={IMAGE_SIZE}:{IMAGE_SIZE},setsar=1,format=rgb24"
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1,format=rgb24"
         ),
         "-frames:v",
         "1",
@@ -160,24 +263,14 @@ def _prepare_image(source: Path, destination: Path) -> None:
 
 def _text_only_graph(workflow: dict[str, Any]) -> dict[str, Any]:
     """Bypass image conditioning and retain only ancestors of output nodes."""
-    image_conditioners = {
-        node_id: node["inputs"]["latent"]
-        for node_id, node in workflow.items()
-        if node["class_type"] == "LTXVImgToVideoInplace"
-    }
-    if not image_conditioners:
-        raise GenerationError("workflow has no image-conditioning stages to bypass")
-
-    for node in workflow.values():
-        for name, value in node["inputs"].items():
-            if (
-                isinstance(value, list)
-                and len(value) == 2
-                and value[0] in image_conditioners
-            ):
-                node["inputs"][name] = list(image_conditioners[value[0]])
-    for node_id in image_conditioners:
-        del workflow[node_id]
+    conditioners = [
+        node
+        for node in workflow.values()
+        if node["class_type"] == "GenVideoMiniMaxH3Conditioning"
+    ]
+    if len(conditioners) != 1:
+        raise GenerationError("workflow has no H3 image-conditioning stage to bypass")
+    conditioners[0]["inputs"].pop("first_frame", None)
 
     roots = [
         node_id
@@ -203,9 +296,37 @@ def _workflow(
     seed: int,
     duration_seconds: int = DEFAULT_DURATION_SECONDS,
     filename_prefix: str = "genvideo",
+    model: str = DEFAULT_MODEL,
+    width: int = 512,
+    height: int = 512,
 ) -> dict[str, Any]:
-    with WORKFLOW_PATH.open() as workflow_file:
+    if model not in SUPPORTED_MODELS:
+        raise GenerationError(f"unsupported model: {model}")
+    with WORKFLOW_PATHS[model].open() as workflow_file:
         workflow: dict[str, Any] = json.load(workflow_file)
+
+    if model == "minimax-h3-base":
+        turbo_loras = [
+            (node_id, node)
+            for node_id, node in workflow.items()
+            if node["class_type"] == "LoraLoaderModelOnly"
+            and "turbo" in node["inputs"].get("lora_name", "").lower()
+        ]
+        schedulers = [
+            node
+            for node in workflow.values()
+            if node["class_type"] == "BasicScheduler"
+        ]
+        if len(turbo_loras) != 1 or len(schedulers) != 1:
+            raise GenerationError("MiniMax H3 workflow has an unexpected Turbo structure")
+        turbo_id, turbo_lora = turbo_loras[0]
+        base_model = turbo_lora["inputs"]["model"]
+        for node in workflow.values():
+            for name, value in node["inputs"].items():
+                if value == [turbo_id, 0]:
+                    node["inputs"][name] = list(base_model)
+        del workflow[turbo_id]
+        schedulers[0]["inputs"]["steps"] = 20
 
     load_images = [node for node in workflow.values() if node["class_type"] == "LoadImage"]
     prompts = [
@@ -220,11 +341,17 @@ def _workflow(
         for node in workflow.values()
         if node.get("_meta", {}).get("title") == "Duration"
     ]
+    conditioners = [
+        node
+        for node in workflow.values()
+        if node["class_type"] == "GenVideoMiniMaxH3Conditioning"
+    ]
     if (
         len(load_images) != 1
         or len(prompts) != 1
         or len(save_videos) != 1
         or len(durations) != 1
+        or len(conditioners) != 1
     ):
         raise GenerationError("workflow template has an unexpected structure")
     if duration_seconds not in SUPPORTED_DURATION_SECONDS:
@@ -235,6 +362,8 @@ def _workflow(
         load_images[0]["inputs"]["image"] = image_name
     prompts[0]["inputs"]["value"] = prompt
     durations[0]["inputs"]["value"] = duration_seconds
+    conditioners[0]["inputs"]["width"] = width
+    conditioners[0]["inputs"]["height"] = height
     save_videos[0]["inputs"]["filename_prefix"] = filename_prefix
     for offset, node in enumerate(noise_nodes):
         node["inputs"]["noise_seed"] = seed + offset
@@ -265,6 +394,39 @@ def _request_json(
         raise GenerationError(f"ComfyUI rejected the request: {details}") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise GenerationError(f"could not communicate with ComfyUI: {exc}") from exc
+
+
+def _resumable_workflow(workflow: dict[str, Any], directory: Path) -> dict[str, Any]:
+    """Replace completed stages and prune their expensive model dependencies."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for node in workflow.values():
+        kind = node["class_type"]
+        if kind == "GenVideoMiniMaxH3Conditioning":
+            if (directory / "conditioning.pt").is_file():
+                node["class_type"] = "GenVideoLoadConditioning"
+                node["inputs"] = {}
+                node["_meta"] = {"title": "Restore saved conditioning"}
+            node["inputs"]["checkpoint_directory"] = str(directory)
+        elif kind == "SamplerCustomAdvanced":
+            if (directory / "latent.pt").is_file():
+                node["class_type"] = "GenVideoLoadLatent"
+                node["inputs"] = {}
+                node["_meta"] = {"title": "Restore generated latents"}
+            else:
+                node["class_type"] = "GenVideoResumableSampler"
+                node["inputs"].pop("sampler")
+            node["inputs"]["checkpoint_directory"] = str(directory)
+    reachable = set()
+    pending = [key for key, node in workflow.items() if node["class_type"] == "SaveVideo"]
+    while pending:
+        key = pending.pop()
+        if key in reachable:
+            continue
+        reachable.add(key)
+        for value in workflow[key]["inputs"].values():
+            if isinstance(value, list) and len(value) == 2 and value[0] in workflow:
+                pending.append(value[0])
+    return {key: node for key, node in workflow.items() if key in reachable}
 
 
 def _process_tree_rss(process: subprocess.Popen[bytes]) -> int:
@@ -352,6 +514,7 @@ async def _progress_listener(
     logged_node_ids: set[str],
     stop_event: threading.Event,
     ready_event: threading.Event,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     websocket_url = base_url.replace("http://", "ws://", 1) + f"/ws?clientId={client_id}"
     started_at = time.monotonic()
@@ -382,6 +545,8 @@ async def _progress_listener(
                     if event_type == "executing" and node_id:
                         node_id = str(node_id)
                         node_started_at[node_id] = time.monotonic()
+                        if progress_callback:
+                            progress_callback({"stage": node_titles.get(node_id, node_id), "step": None, "total": None})
                         if node_id in logged_node_ids:
                             title = node_titles.get(node_id, node_id)
                             print(
@@ -392,6 +557,8 @@ async def _progress_listener(
                             )
                     elif event_type == "progress":
                         value, maximum = data.get("value"), data.get("max")
+                        if progress_callback:
+                            progress_callback({"stage": node_titles.get(str(node_id), "Generating"), "step": value, "total": maximum})
                         if value is None or maximum is None:
                             continue
                         node_id = str(node_id)
@@ -430,6 +597,7 @@ def _run_progress_listener(
     logged_node_ids: set[str],
     stop_event: threading.Event,
     ready_event: threading.Event,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     asyncio.run(
         _progress_listener(
@@ -439,6 +607,7 @@ def _run_progress_listener(
             logged_node_ids,
             stop_event,
             ready_event,
+            progress_callback,
         )
     )
 
@@ -449,6 +618,7 @@ def _generate(
     workflow: dict[str, Any],
     output_directory: Path,
     memory_limit: int,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Path:
     client_id = uuid.uuid4().hex
     node_titles = {
@@ -471,6 +641,7 @@ def _generate(
             logged_node_ids,
             stop_progress,
             progress_ready,
+            progress_callback,
         ),
         daemon=True,
     )
@@ -478,6 +649,8 @@ def _generate(
     progress_ready.wait(timeout=10)
     peak_rss = 0
     minimum_available = psutil.virtual_memory().available
+    initial_swap = psutil.swap_memory().used
+    peak_swap_growth = 0
     try:
         response = _request_json(
             f"{base_url}/prompt",
@@ -493,6 +666,19 @@ def _generate(
             minimum_available = min(
                 minimum_available, psutil.virtual_memory().available
             )
+            if minimum_available < MIN_SYSTEM_AVAILABLE_GIB * 1024**3:
+                raise GenerationError(
+                    f"system memory safety reserve breached "
+                    f"({minimum_available / 1024**3:.1f} GiB available < "
+                    f"{MIN_SYSTEM_AVAILABLE_GIB:g} GiB); generation stopped"
+                )
+            swap_growth = max(0, psutil.swap_memory().used - initial_swap)
+            peak_swap_growth = max(peak_swap_growth, swap_growth)
+            if swap_growth > MAX_SWAP_GROWTH_GIB * 1024**3:
+                raise GenerationError(
+                    f"swap safety limit exceeded ({swap_growth / 1024**3:.1f} GiB "
+                    f"growth > {MAX_SWAP_GROWTH_GIB:g} GiB); generation stopped"
+                )
             history = _request_json(f"{base_url}/history/{prompt_id}", timeout=10)
             if prompt_id in history:
                 record = history[prompt_id]
@@ -512,34 +698,49 @@ def _generate(
             print(
                 f"genvideo: peak process-tree RSS {peak_rss / 1024**3:.1f} GiB; "
                 f"minimum system-available memory "
-                f"{minimum_available / 1024**3:.1f} GiB",
+                f"{minimum_available / 1024**3:.1f} GiB; "
+                f"peak swap growth {peak_swap_growth / 1024**3:.1f} GiB",
                 file=sys.stderr,
                 flush=True,
             )
 
 
-def _stop_server(process: subprocess.Popen[bytes]) -> None:
+def _stop_server(process: subprocess.Popen[bytes], own_group: bool = True) -> None:
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGINT)
+        if own_group:
+            os.killpg(process.pid, signal.SIGINT)
+        else:
+            process.send_signal(signal.SIGINT)
         process.wait(timeout=20)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            if own_group:
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
             process.wait()
 
 
 class ComfySession:
     """An isolated ComfyUI process reusable across sequential generations."""
 
-    def __init__(self, memory_limit_gib: float = 56.0):
+    def __init__(
+        self, memory_limit_gib: float = 56.0, model: str = DEFAULT_MODEL,
+        *, work_directory: Path | None = None, own_process_group: bool = True,
+    ):
         if not 0 < memory_limit_gib <= HARD_MEMORY_CEILING_GIB:
             raise GenerationError(
                 f"memory limit must be greater than 0 and at most "
                 f"{HARD_MEMORY_CEILING_GIB:g} GiB"
             )
+        if model not in SUPPORTED_MODELS:
+            raise GenerationError(f"unsupported model: {model}")
         self.memory_limit = int(memory_limit_gib * 1024**3)
+        self.model = model
+        self.work_directory = work_directory
+        self.own_process_group = own_process_group
         self._temporary: Any | None = None
         self._log_file: Any | None = None
         self.process: subprocess.Popen[bytes] | None = None
@@ -554,11 +755,16 @@ class ComfySession:
             return
         if not COMFY_PYTHON.is_file() or not (COMFY_DIR / "main.py").is_file():
             raise GenerationError(f"ComfyUI runtime is missing from {COMFY_DIR}")
-        if not WORKFLOW_PATH.is_file():
-            raise GenerationError(f"workflow template is missing: {WORKFLOW_PATH}")
+        workflow_path = WORKFLOW_PATHS[self.model]
+        if not workflow_path.is_file():
+            raise GenerationError(f"workflow template is missing: {workflow_path}")
 
-        self._temporary = tempfile.TemporaryDirectory(prefix="genvideo-")
-        temporary = Path(self._temporary.name)
+        if self.work_directory is None:
+            self._temporary = tempfile.TemporaryDirectory(prefix="genvideo-")
+            temporary = Path(self._temporary.name)
+        else:
+            temporary = self.work_directory
+            temporary.mkdir(parents=True, exist_ok=True)
         self.input_directory = temporary / "input"
         self.output_directory = temporary / "output"
         comfy_temp = temporary / "temp"
@@ -569,11 +775,16 @@ class ComfySession:
             comfy_temp,
             user_directory,
         ):
-            directory.mkdir()
+            directory.mkdir(exist_ok=True)
         port = _free_port()
         self.base_url = f"http://127.0.0.1:{port}"
         self.log_path = temporary / "comfyui.log"
         self._log_file = self.log_path.open("wb")
+        comfy_environment = os.environ.copy()
+        comfy_environment["PYTHONPATH"] = os.pathsep.join(filter(None, [str(ROOT), comfy_environment.get("PYTHONPATH")]))
+        if sys.platform == "darwin":
+            comfy_environment.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        memory_arguments = ["--lowvram", "--fast-disk"]
         try:
             self.process = subprocess.Popen(
                 [
@@ -592,14 +803,17 @@ class ComfySession:
                     str(comfy_temp),
                     "--user-directory",
                     str(user_directory),
+                    "--extra-model-paths-config",
+                    str(ROOT / "extra_model_paths.yaml"),
                     "--cache-none",
-                    "--lowvram",
+                    *memory_arguments,
                     "--disable-metadata",
                 ],
                 cwd=COMFY_DIR,
                 stdout=self._log_file,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                start_new_session=self.own_process_group,
+                env=comfy_environment,
             )
             _wait_for_server(self.base_url, self.process, self.memory_limit)
         except BaseException as exc:
@@ -630,7 +844,18 @@ class ComfySession:
         image: Path | None = None,
         seed: int | None = None,
         duration_seconds: int = DEFAULT_DURATION_SECONDS,
+        model: str = DEFAULT_MODEL,
+        resolution: int = DEFAULT_RESOLUTION,
+        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+        checkpoint_directory: Path | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> Path:
+        if model not in SUPPORTED_MODELS:
+            raise GenerationError(f"unsupported model: {model}")
+        if model != self.model:
+            raise GenerationError(
+                f"session was started for {self.model}, not {model}"
+            )
         self.start()
         assert self.process is not None
         assert self.base_url is not None
@@ -651,30 +876,39 @@ class ComfySession:
         if duration_seconds not in SUPPORTED_DURATION_SECONDS:
             supported = ", ".join(str(value) for value in SUPPORTED_DURATION_SECONDS)
             raise GenerationError(f"duration must be one of: {supported} seconds")
+        width, height = canvas_dimensions(resolution, aspect_ratio)
         selected_seed = seed if seed is not None else _random_seed()
 
         job_token = uuid.uuid4().hex
         prepared_image: Path | None = None
         if source is None:
             workflow = _workflow(
-                None,
-                cleaned_prompt,
-                selected_seed,
-                duration_seconds,
-                f"job-{job_token}",
+                image_name=None,
+                prompt=cleaned_prompt,
+                seed=selected_seed,
+                duration_seconds=duration_seconds,
+                filename_prefix=f"job-{job_token}",
+                model=model,
+                width=width,
+                height=height,
             )
         else:
             if shutil.which("ffmpeg") is None:
                 raise GenerationError("ffmpeg is required but was not found on PATH")
             prepared_image = self.input_directory / f"{job_token}.png"
-            _prepare_image(source, prepared_image)
+            _prepare_image(source, prepared_image, width, height)
             workflow = _workflow(
-                prepared_image.name,
-                cleaned_prompt,
-                selected_seed,
-                duration_seconds,
-                f"job-{job_token}",
+                image_name=prepared_image.name,
+                prompt=cleaned_prompt,
+                seed=selected_seed,
+                duration_seconds=duration_seconds,
+                filename_prefix=f"job-{job_token}",
+                model=model,
+                width=width,
+                height=height,
             )
+        if checkpoint_directory is not None:
+            workflow = _resumable_workflow(workflow, checkpoint_directory)
         try:
             generated = _generate(
                 self.process,
@@ -682,6 +916,7 @@ class ComfySession:
                 workflow,
                 self.output_directory,
                 self.memory_limit,
+                progress_callback,
             )
             output.parent.mkdir(parents=True, exist_ok=True)
             staging = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
@@ -707,7 +942,7 @@ class ComfySession:
     def close(self) -> None:
         process, self.process = self.process, None
         if process is not None:
-            _stop_server(process)
+            _stop_server(process, self.own_process_group)
         if self._log_file is not None:
             self._log_file.close()
             self._log_file = None
@@ -734,13 +969,22 @@ def _random_seed() -> int:
 def run(args: argparse.Namespace) -> Path:
     image, output = _validate_args(args)
     seed = args.seed if args.seed is not None else _random_seed()
-    with ComfySession(args.memory_limit_gib) as session:
+    prompt = build_h3_prompt(
+        args.prompt,
+        args.overall_soundscape,
+        args.non_diegetic_music,
+        image_mode=image is not None,
+    )
+    with ComfySession(args.memory_limit_gib, args.model) as session:
         return session.generate(
-            args.prompt,
+            prompt,
             output,
             image=image,
             seed=seed,
             duration_seconds=args.duration,
+            model=args.model,
+            resolution=args.resolution,
+            aspect_ratio=args.aspect_ratio,
         )
 
 
