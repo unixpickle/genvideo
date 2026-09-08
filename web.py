@@ -63,6 +63,8 @@ class Job:
     structured_prompt: dict[str, str] = field(default_factory=dict)
     upload_path: Path | None = None
     image_content_type: str | None = None
+    last_upload_path: Path | None = None
+    last_image_content_type: str | None = None
     priority: str = "medium"
     queue_order: int = 0
     progress: dict[str, Any] = field(default_factory=dict)
@@ -89,6 +91,8 @@ class Job:
                 self.upload_path.name if self.upload_path is not None else None
             ),
             "image_content_type": self.image_content_type,
+            "last_upload_filename": self.last_upload_path.name if self.last_upload_path else None,
+            "last_image_content_type": self.last_image_content_type,
             "priority": self.priority,
             "queue_order": self.queue_order,
             "progress": self.progress,
@@ -132,6 +136,13 @@ class Job:
                 and self.upload_path is not None
                 and self.upload_path.is_file()
                 else None
+            ),
+            "has_first_frame": self.upload_path is not None,
+            "has_last_frame": self.last_upload_path is not None,
+            "last_image_prompt_url": (
+                f"/prompt-images/{self.id}/last"
+                if self.mode == "image" and self.last_upload_path is not None
+                and self.last_upload_path.is_file() else None
             ),
             "media_url": (
                 f"/media/{self.output_path.name}"
@@ -193,12 +204,17 @@ class QueueManager:
                 raise ValueError(f"invalid job in {self.state_path}")
             output_filename = str(record["output_filename"])
             upload_filename = record.get("upload_filename")
+            last_upload_filename = record.get("last_upload_filename")
             if Path(output_filename).name != output_filename:
                 raise ValueError(f"invalid output filename in {self.state_path}")
             if upload_filename is not None:
                 upload_filename = str(upload_filename)
                 if Path(upload_filename).name != upload_filename:
                     raise ValueError(f"invalid upload filename in {self.state_path}")
+            if last_upload_filename is not None:
+                last_upload_filename = str(last_upload_filename)
+                if Path(last_upload_filename).name != last_upload_filename:
+                    raise ValueError(f"invalid last upload filename in {self.state_path}")
             # Queue records from before per-job model selection were LTX jobs.
             model = str(record.get("model", "ltx-2.5"))
             if model not in {*SUPPORTED_MODELS, *LEGACY_MODEL_LABELS}:
@@ -236,6 +252,9 @@ class QueueManager:
                     else None
                 ),
                 image_content_type=record.get("image_content_type"),
+                last_upload_path=(self.upload_directory / last_upload_filename
+                                  if last_upload_filename is not None else None),
+                last_image_content_type=record.get("last_image_content_type"),
                 status=str(record["status"]),
                 priority=str(record.get("priority", "medium")),
                 queue_order=int(record.get("queue_order", len(self.jobs))),
@@ -265,11 +284,13 @@ class QueueManager:
                     job.error = "LTX-2.5 support has been removed."
                     job.finished_at = time.time()
                 elif job.mode == "image" and (
-                    job.upload_path is None or not job.upload_path.is_file()
+                    not any((job.upload_path, job.last_upload_path))
+                    or any(path is not None and not path.is_file()
+                           for path in (job.upload_path, job.last_upload_path))
                 ):
                     job.status = "failed"
                     job.error = (
-                        "The starting image was lost before this job could resume."
+                        "A conditioning image was lost before this job could resume."
                     )
                     job.finished_at = time.time()
                 else:
@@ -304,6 +325,8 @@ class QueueManager:
         upload_path: Path | None,
         image_content_type: str | None = None,
         priority: str = "medium",
+        last_upload_path: Path | None = None,
+        last_image_content_type: str | None = None,
     ) -> Job:
         if priority not in PRIORITIES:
             raise ValueError(f"unsupported priority: {priority}")
@@ -328,6 +351,8 @@ class QueueManager:
             structured_prompt=structured_prompt,
             upload_path=upload_path,
             image_content_type=image_content_type,
+            last_upload_path=last_upload_path,
+            last_image_content_type=last_image_content_type,
             output_path=self.output_directory / f"{stamp}-{job_id}.mp4",
         )
         self.jobs[job.id] = job
@@ -346,15 +371,18 @@ class QueueManager:
         if original.model not in SUPPORTED_MODELS:
             raise web.HTTPConflict(text="this legacy LTX-2.5 job cannot be regenerated")
 
-        copied_upload: Path | None = None
+        copied_uploads: list[Path | None] = [None, None]
         try:
             if original.mode == "image":
-                if original.upload_path is None or not original.upload_path.is_file():
+                paths = (original.upload_path, original.last_upload_path)
+                if not any(paths) or any(path is not None and not path.is_file() for path in paths):
                     raise web.HTTPConflict(
-                        text="the starting image for this job is no longer available"
+                        text="a conditioning image for this job is no longer available"
                     )
-                copied_upload = self.upload_directory / f"{uuid.uuid4().hex}.upload"
-                shutil.copyfile(original.upload_path, copied_upload)
+                for index, path in enumerate(paths):
+                    if path is not None:
+                        copied_uploads[index] = self.upload_directory / f"{uuid.uuid4().hex}.upload"
+                        shutil.copyfile(path, copied_uploads[index])
             return self.add(
                 original.prompt,
                 original.structured_prompt.copy(),
@@ -364,13 +392,16 @@ class QueueManager:
                 original.model,
                 original.resolution,
                 original.aspect_ratio,
-                copied_upload,
+                copied_uploads[0],
                 original.image_content_type,
                 original.priority,
+                copied_uploads[1],
+                original.last_image_content_type,
             )
         except BaseException:
-            if copied_upload is not None:
-                copied_upload.unlink(missing_ok=True)
+            for path in copied_uploads:
+                if path is not None:
+                    path.unlink(missing_ok=True)
             raise
 
     def _next_order(self) -> int:
@@ -458,8 +489,9 @@ class QueueManager:
         if self.active_job is job:
             await self._stop_process()
             await self.active_stopped.wait()
-        if job.upload_path is not None:
-            job.upload_path.unlink(missing_ok=True)
+        for path in (job.upload_path, job.last_upload_path):
+            if path is not None:
+                path.unlink(missing_ok=True)
         job.output_path.unlink(missing_ok=True)
         for staging in self.output_directory.glob(f".{job.output_path.name}.*.tmp"):
             staging.unlink(missing_ok=True)
@@ -491,6 +523,7 @@ class QueueManager:
         spec = job.as_record() | {
             "output_path": str(job.output_path),
             "upload_path": str(job.upload_path) if job.upload_path else None,
+            "last_upload_path": str(job.last_upload_path) if job.last_upload_path else None,
             "memory_limit": self.memory_limit,
         }
         (directory / "request.json").write_text(json.dumps(spec))
@@ -596,7 +629,8 @@ async def get_jobs(request: web.Request) -> web.Response:
 async def create_job(request: web.Request) -> web.Response:
     manager = _manager(request)
     job_token = uuid.uuid4().hex
-    staged_upload = manager.upload_directory / f"{job_token}.upload"
+    staged_uploads = {name: manager.upload_directory / f"{job_token}-{name}.upload"
+                      for name in ("image", "last_image")}
     text_fields: dict[str, str] = {}
     accepted_fields = {
         "prompt",
@@ -611,18 +645,19 @@ async def create_job(request: web.Request) -> web.Response:
         "aspect_ratio",
         "priority",
     }
-    image_received = False
-    image_content_type = None
+    received: dict[str, str] = {}
     try:
         if request.content_type.startswith("multipart/"):
             reader = await request.multipart()
             async for part in reader:
-                if part.name == "image" and part.filename:
+                if part.name in staged_uploads and part.filename:
+                    if part.name in received:
+                        raise web.HTTPBadRequest(text="provide only one file per frame")
                     image_content_type = part.headers.get("Content-Type") or ""
                     if not image_content_type.startswith("image/"):
                         raise web.HTTPBadRequest(text="the uploaded file must be an image")
                     size = 0
-                    with staged_upload.open("wb") as upload_file:
+                    with staged_uploads[part.name].open("wb") as upload_file:
                         while chunk := await part.read_chunk(1024 * 1024):
                             size += len(chunk)
                             if size > MAX_UPLOAD_BYTES:
@@ -630,7 +665,10 @@ async def create_job(request: web.Request) -> web.Response:
                                     max_size=MAX_UPLOAD_BYTES, actual_size=size
                                 )
                             upload_file.write(chunk)
-                    image_received = size > 0
+                    if size:
+                        received[part.name] = image_content_type
+                    else:
+                        staged_uploads[part.name].unlink(missing_ok=True)
                 elif part.name in accepted_fields:
                     text_fields[part.name] = (await part.text()).strip()
         else:
@@ -661,24 +699,12 @@ async def create_job(request: web.Request) -> web.Response:
             raise web.HTTPBadRequest(text="mode must be text or image")
         if model not in SUPPORTED_MODELS:
             raise web.HTTPBadRequest(text="unsupported model")
-        try:
-            prompt = build_h3_prompt(
-                integrated_description,
-                overall_soundscape,
-                non_diegetic_music,
-                image_mode=mode == "image",
-            )
-        except GenerationError as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        if len(prompt) > 8000:
-            raise web.HTTPBadRequest(
-                text="combined H3 prompt must be 8,000 characters or fewer"
-            )
-        if mode == "image" and not image_received:
-            raise web.HTTPBadRequest(text="an initial image is required in image mode")
-        if mode == "text" and staged_upload.exists():
-            staged_upload.unlink()
-            image_received = False
+        if mode == "image" and not received:
+            raise web.HTTPBadRequest(text="a start or end image is required in image mode")
+        if mode == "text":
+            for path in staged_uploads.values():
+                path.unlink(missing_ok=True)
+            received.clear()
         try:
             seed = int(seed_text) if seed_text else _random_seed()
         except ValueError as exc:
@@ -701,6 +727,20 @@ async def create_job(request: web.Request) -> web.Response:
         except GenerationError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
+        try:
+            prompt = build_h3_prompt(
+                integrated_description,
+                overall_soundscape,
+                non_diegetic_music,
+                image_mode="image" in received,
+                last_frame="last_image" in received,
+                duration_seconds=duration_seconds,
+            )
+        except GenerationError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        if len(prompt) > 8000:
+            raise web.HTTPBadRequest(text="combined H3 prompt must be 8,000 characters or fewer")
+
         structured_prompt = {
             "integrated_multimodal_description": integrated_description,
             "overall_soundscape": overall_soundscape,
@@ -716,14 +756,16 @@ async def create_job(request: web.Request) -> web.Response:
             model,
             resolution,
             aspect_ratio,
-            staged_upload if image_received else None,
-            image_content_type if image_received else None,
+            staged_uploads["image"] if "image" in received else None,
+            received.get("image"),
             priority,
+            staged_uploads["last_image"] if "last_image" in received else None,
+            received.get("last_image"),
         )
         return web.json_response(job.as_dict(), status=201)
     except BaseException:
-        if staged_upload.exists():
-            staged_upload.unlink()
+        for path in staged_uploads.values():
+            path.unlink(missing_ok=True)
         raise
 
 
@@ -760,21 +802,21 @@ async def edit_job(request: web.Request) -> web.Response:
 
 async def prompt_image(request: web.Request) -> web.FileResponse:
     job = _manager(request).jobs.get(request.match_info["job_id"])
-    if (
-        job is None
-        or job.mode != "image"
-        or job.upload_path is None
-        or not job.upload_path.is_file()
-    ):
+    if job is None or job.mode != "image":
+        raise web.HTTPNotFound()
+    last = request.match_info.get("frame") == "last"
+    path = job.last_upload_path if last else job.upload_path
+    content_type = job.last_image_content_type if last else job.image_content_type
+    if path is None or not path.is_file():
         raise web.HTTPNotFound()
     headers = {
         "Cache-Control": "private, max-age=86400",
         "Content-Security-Policy": "default-src 'none'; sandbox",
         "X-Content-Type-Options": "nosniff",
     }
-    if job.image_content_type:
-        headers["Content-Type"] = job.image_content_type
-    return web.FileResponse(job.upload_path, headers=headers)
+    if content_type:
+        headers["Content-Type"] = content_type
+    return web.FileResponse(path, headers=headers)
 
 
 async def media(request: web.Request) -> web.FileResponse:
@@ -789,7 +831,7 @@ async def media(request: web.Request) -> web.FileResponse:
 
 def make_app(output_directory: Path, memory_limit: float = 56.0) -> web.Application:
     manager = QueueManager(output_directory.resolve(), memory_limit)
-    app = web.Application(client_max_size=MAX_UPLOAD_BYTES)
+    app = web.Application(client_max_size=2 * MAX_UPLOAD_BYTES + 1024 * 1024)
     app[MANAGER_KEY] = manager
 
     async def startup(_: web.Application) -> None:
@@ -809,6 +851,7 @@ def make_app(output_directory: Path, memory_limit: float = 56.0) -> web.Applicat
     app.router.add_post("/api/jobs/{job_id}/resume", resume_job)
     app.router.add_patch("/api/jobs/{job_id}", edit_job)
     app.router.add_get("/prompt-images/{job_id}", prompt_image)
+    app.router.add_get("/prompt-images/{job_id}/{frame:last}", prompt_image)
     app.router.add_get("/media/{filename}", media)
     app.router.add_static("/assets", WEB_DIR, append_version=True)
     return app

@@ -39,6 +39,7 @@ def run(directory, parent_pid):
         session.generate(
             spec["prompt"], Path(spec["output_path"]),
             image=Path(spec["upload_path"]) if spec["upload_path"] else None,
+            last_image=Path(spec["last_upload_path"]) if spec.get("last_upload_path") else None,
             seed=spec["seed"], duration_seconds=spec["duration_seconds"],
             model=spec["model"], resolution=spec["resolution"],
             aspect_ratio=spec["aspect_ratio"], checkpoint_directory=directory,

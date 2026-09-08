@@ -8,11 +8,19 @@ const modelHint = document.querySelector("#model-hint");
 const durationSpec = document.querySelector("#duration-spec");
 const canvasSpec = document.querySelector("#canvas-spec");
 const imageField = document.querySelector("#image-field");
-const imageInput = document.querySelector("#image");
-const imagePreview = document.querySelector("#image-preview");
-const uploadEmpty = document.querySelector("#upload-empty");
-const uploadBox = document.querySelector("#upload-box");
-const changeImage = document.querySelector("#change-image");
+const frameInputs = [
+  { prefix: "", urlKey: "image_prompt_url", presenceKey: "has_first_frame", label: "start frame" },
+  { prefix: "last-", urlKey: "last_image_prompt_url", presenceKey: "has_last_frame", label: "end frame" },
+].map(frame => ({
+  ...frame,
+  input: document.querySelector(`#${frame.prefix}image`),
+  preview: document.querySelector(`#${frame.prefix}image-preview`),
+  empty: document.querySelector(`#${frame.prefix}upload-empty`),
+  box: document.querySelector(`#${frame.prefix}upload-box`),
+  change: document.querySelector(`#${frame.prefix}change-image`),
+  remove: document.querySelector(`#${frame.prefix}remove-image`),
+  previewUrl: null,
+}));
 const submitButton = document.querySelector("#submit-button");
 const formError = document.querySelector("#form-error");
 const queueElement = document.querySelector("#queue");
@@ -21,7 +29,6 @@ const queueCount = document.querySelector("#queue-count");
 const enginePill = document.querySelector("#engine-pill");
 const engineLabel = document.querySelector("#engine-label");
 
-let previewUrl = null;
 const cards = new Map();
 let refreshInFlight = false;
 let currentSnapshot = null;
@@ -38,7 +45,6 @@ function selectedMode() {
 function updateMode() {
   const usesImage = selectedMode() === "image";
   imageField.hidden = !usesImage;
-  imageInput.required = usesImage;
 }
 
 function canvasDimensions() {
@@ -71,14 +77,17 @@ function updateModel() {
 }
 
 function updatePreview() {
-  if (previewUrl) URL.revokeObjectURL(previewUrl);
-  const file = imageInput.files[0];
-  previewUrl = file ? URL.createObjectURL(file) : null;
-  imagePreview.hidden = !file;
-  uploadEmpty.hidden = Boolean(file);
-  changeImage.hidden = !file;
-  if (file) imagePreview.src = previewUrl;
-  else imagePreview.removeAttribute("src");
+  for (const frame of frameInputs) {
+    if (frame.previewUrl) URL.revokeObjectURL(frame.previewUrl);
+    const file = frame.input.files[0];
+    frame.previewUrl = file ? URL.createObjectURL(file) : null;
+    frame.preview.hidden = !file;
+    frame.empty.hidden = Boolean(file);
+    frame.change.hidden = !file;
+    frame.remove.hidden = !file;
+    if (file) frame.preview.src = frame.previewUrl;
+    else frame.preview.removeAttribute("src");
+  }
 }
 
 function formatAge(timestamp) {
@@ -153,30 +162,32 @@ function jobCard(job) {
   }
   card.append(top);
 
-  if (job.image_prompt_url) {
-    const imagePrompt = document.createElement("figure");
-    imagePrompt.className = "job-image-prompt";
-    const imageLabel = document.createElement("figcaption");
-    imageLabel.className = "job-image-prompt-label";
-    imageLabel.textContent = "Starting image";
-    const imageLink = document.createElement("a");
-    imageLink.className = "job-prompt-image-link";
-    imageLink.href = job.image_prompt_url;
-    imageLink.target = "_blank";
-    imageLink.rel = "noopener";
-    imageLink.title = "View starting image at full size";
-    const image = document.createElement("img");
-    image.className = "job-prompt-image";
-    image.src = job.image_prompt_url;
-    image.alt = "Starting image prompt";
-    imageLink.append(image);
-    imagePrompt.append(imageLabel, imageLink);
-    card.append(imagePrompt);
-  } else if (job.mode === "image") {
-    const unavailable = document.createElement("p");
-    unavailable.className = "job-image-prompt-unavailable";
-    unavailable.textContent = "Starting image unavailable";
-    card.append(unavailable);
+  for (const frame of frameInputs) {
+    if (job[frame.urlKey]) {
+      const imagePrompt = document.createElement("figure");
+      imagePrompt.className = "job-image-prompt";
+      const imageLabel = document.createElement("figcaption");
+      imageLabel.className = "job-image-prompt-label";
+      imageLabel.textContent = frame.label;
+      const imageLink = document.createElement("a");
+      imageLink.className = "job-prompt-image-link";
+      imageLink.href = job[frame.urlKey];
+      imageLink.target = "_blank";
+      imageLink.rel = "noopener";
+      imageLink.title = `View ${frame.label} at full size`;
+      const image = document.createElement("img");
+      image.className = "job-prompt-image";
+      image.src = job[frame.urlKey];
+      image.alt = frame.label;
+      imageLink.append(image);
+      imagePrompt.append(imageLabel, imageLink);
+      card.append(imagePrompt);
+    } else if (job.mode === "image" && job[frame.presenceKey]) {
+      const unavailable = document.createElement("p");
+      unavailable.className = "job-image-prompt-unavailable";
+      unavailable.textContent = `${frame.label} unavailable`;
+      card.append(unavailable);
+    }
   }
 
   const meta = document.createElement("div");
@@ -412,13 +423,6 @@ async function jobAction(id, action, button, changes) {
 async function copyToForm(job, button) {
   button.disabled = true;
   try {
-    let imageFile = null;
-    if (job.image_prompt_url) {
-      const response = await fetch(job.image_prompt_url);
-      if (!response.ok) throw new Error("Could not load the starting image.");
-      const blob = await response.blob();
-      imageFile = new File([blob], "starting-image", { type: blob.type });
-    }
     const fields = job.structured_prompt || {};
     promptInputs.forEach(input => {
       input.value = fields[input.name] || (input.name === "integrated_multimodal_description" && !Object.keys(fields).length ? job.prompt : "");
@@ -426,18 +430,36 @@ async function copyToForm(job, button) {
     });
     form.elements.mode.value = job.mode;
     modelInput.value = [...modelInput.options].some(option => option.value === job.model) ? job.model : "minimax-h3";
-    durationInput.value = String(job.duration_seconds);
-    resolutionInput.value = String(job.resolution);
-    aspectRatioInput.value = job.aspect_ratio;
+    durationInput.value = String(job.duration_seconds ?? 5);
+    resolutionInput.value = String(job.resolution ?? 512);
+    aspectRatioInput.value = job.aspect_ratio || "1:1";
     form.elements.priority.value = job.priority || "medium";
     form.elements.seed.value = job.seed_text || String(job.seed);
-    const transfer = new DataTransfer();
-    if (imageFile) transfer.items.add(imageFile);
-    imageInput.files = transfer.files;
+    frameInputs.forEach(frame => { frame.input.value = ""; });
     updateMode(); updateModel(); updateOutputSpecs(); updatePreview();
     formError.hidden = true;
-    if (job.mode === "image" && !imageFile) {
-      formError.textContent = "Copied settings. Choose a replacement starting image before submitting.";
+    const missing = [];
+    for (const frame of frameInputs) {
+      if (job[frame.urlKey]) {
+        try {
+          const response = await fetch(job[frame.urlKey]);
+          if (!response.ok) throw new Error("Could not load image.");
+          const blob = await response.blob();
+          const transfer = new DataTransfer();
+          transfer.items.add(new File([blob], frame.label, { type: blob.type }));
+          frame.input.files = transfer.files;
+        } catch (error) {
+          missing.push(frame.label);
+        }
+      } else if (job[frame.presenceKey]) {
+        missing.push(frame.label);
+      }
+    }
+    updatePreview();
+    if (missing.length || (job.mode === "image" && !frameInputs.some(frame => frame.input.files.length))) {
+      formError.textContent = missing.length
+        ? `Copied settings. Could not load the ${missing.join(" and ")}; choose replacements before submitting.`
+        : "Copied settings. Choose a start or end frame before submitting.";
       formError.hidden = false;
     }
     document.querySelector(".composer").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -452,8 +474,8 @@ async function copyToForm(job, button) {
 form.addEventListener("submit", async event => {
   event.preventDefault();
   formError.hidden = true;
-  if (selectedMode() === "image" && !imageInput.files.length) {
-    formError.textContent = "Choose a starting image first.";
+  if (selectedMode() === "image" && !frameInputs.some(frame => frame.input.files.length)) {
+    formError.textContent = "Choose a start frame, an end frame, or both.";
     formError.hidden = false;
     return;
   }
@@ -461,7 +483,7 @@ form.addEventListener("submit", async event => {
   submitButton.querySelector("span").textContent = "Adding…";
   try {
     const data = new FormData(form);
-    if (selectedMode() === "text") data.delete("image");
+    if (selectedMode() === "text") frameInputs.forEach(frame => data.delete(frame.input.name));
     const response = await fetch("/api/jobs", { method: "POST", body: data });
     if (!response.ok) throw new Error(await response.text());
     promptInputs.forEach(input => {
@@ -470,7 +492,7 @@ form.addEventListener("submit", async event => {
       if (count) count.textContent = "0 / 8000";
       resizePromptInput(input);
     });
-    imageInput.value = "";
+    frameInputs.forEach(frame => { frame.input.value = ""; });
     updatePreview();
     await refresh();
     selectTab("queue");
@@ -494,28 +516,29 @@ promptInputs.forEach(input => input.addEventListener("input", () => {
   if (count) count.textContent = `${input.value.length} / 8000`;
   resizePromptInput(input);
 }));
-imageInput.addEventListener("change", updatePreview);
-changeImage.addEventListener("click", event => {
-  event.preventDefault();
-  imageInput.click();
-});
-["dragenter", "dragover"].forEach(name => uploadBox.addEventListener(name, event => {
-  event.preventDefault();
-  uploadBox.classList.add("dragging");
-}));
-["dragleave"].forEach(name => uploadBox.addEventListener(name, () => {
-  uploadBox.classList.remove("dragging");
-}));
-uploadBox.addEventListener("drop", event => {
-  event.preventDefault();
-  uploadBox.classList.remove("dragging");
-  const file = [...event.dataTransfer.files].find(candidate => candidate.type.startsWith("image/"));
-  if (!file) return;
-  const transfer = new DataTransfer();
-  transfer.items.add(file);
-  imageInput.files = transfer.files;
-  updatePreview();
-});
+for (const frame of frameInputs) {
+  frame.input.addEventListener("change", updatePreview);
+  frame.change.addEventListener("click", () => frame.input.click());
+  frame.remove.addEventListener("click", () => {
+    frame.input.value = "";
+    updatePreview();
+  });
+  ["dragenter", "dragover"].forEach(name => frame.box.addEventListener(name, event => {
+    event.preventDefault();
+    frame.box.classList.add("dragging");
+  }));
+  frame.box.addEventListener("dragleave", () => frame.box.classList.remove("dragging"));
+  frame.box.addEventListener("drop", event => {
+    event.preventDefault();
+    frame.box.classList.remove("dragging");
+    const file = [...event.dataTransfer.files].find(candidate => candidate.type.startsWith("image/"));
+    if (!file) return;
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    frame.input.files = transfer.files;
+    updatePreview();
+  });
+}
 
 setInterval(() => {
   document.querySelectorAll(".job-timing[data-started-at]").forEach(element => {

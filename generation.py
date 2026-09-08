@@ -104,6 +104,8 @@ def build_h3_prompt(
     non_diegetic_music: str = "",
     *,
     image_mode: bool = False,
+    last_frame: bool = False,
+    duration_seconds: int = DEFAULT_DURATION_SECONDS,
 ) -> str:
     """Serialize the optional H3 base prompt fields in their official order."""
     fields = (
@@ -120,6 +122,13 @@ def build_h3_prompt(
             "For the target video, at 0.00 seconds into the target video, "
             "<Picture 1> (from [Shot 1]) is fully referenced.",
         )
+    if last_frame:
+        frames = max(5, round(duration_seconds * 24))
+        frames += (5 - frames % 17) % 17
+        picture = 2 if image_mode else 1
+        sections.insert(1 if image_mode else 0,
+            f"For the target video, at {(frames - 1) / 24:.2f} seconds into the target video, "
+            f"<Picture {picture}> is fully referenced as the last frame.")
     return "\n\n".join(sections)
 
 
@@ -158,6 +167,7 @@ def _text_only_graph(workflow: dict[str, Any]) -> dict[str, Any]:
     if len(conditioners) != 1:
         raise GenerationError("workflow has no H3 image-conditioning stage to bypass")
     conditioners[0]["inputs"].pop("first_frame", None)
+    conditioners[0]["inputs"].pop("last_frame", None)
 
     roots = [
         node_id
@@ -186,6 +196,7 @@ def _workflow(
     model: str = DEFAULT_MODEL,
     width: int = 512,
     height: int = 512,
+    last_image_name: str | None = None,
 ) -> dict[str, Any]:
     if model not in SUPPORTED_MODELS:
         raise GenerationError(f"unsupported model: {model}")
@@ -247,6 +258,16 @@ def _workflow(
 
     if image_name is not None:
         load_images[0]["inputs"]["image"] = image_name
+    else:
+        first_link = conditioners[0]["inputs"].pop("first_frame")
+        del workflow[first_link[0]]
+    if last_image_name is not None:
+        workflow["last_image"] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": last_image_name},
+            "_meta": {"title": "Load Last Frame"},
+        }
+        conditioners[0]["inputs"]["last_frame"] = ["last_image", 0]
     prompts[0]["inputs"]["value"] = prompt
     durations[0]["inputs"]["value"] = duration_seconds
     conditioners[0]["inputs"]["width"] = width
@@ -254,7 +275,7 @@ def _workflow(
     save_videos[0]["inputs"]["filename_prefix"] = filename_prefix
     for offset, node in enumerate(noise_nodes):
         node["inputs"]["noise_seed"] = seed + offset
-    return workflow if image_name is not None else _text_only_graph(workflow)
+    return workflow if image_name is not None or last_image_name is not None else _text_only_graph(workflow)
 
 
 def _free_port() -> int:
@@ -729,6 +750,7 @@ class ComfySession:
         output: Path,
         *,
         image: Path | None = None,
+        last_image: Path | None = None,
         seed: int | None = None,
         duration_seconds: int = DEFAULT_DURATION_SECONDS,
         model: str = DEFAULT_MODEL,
@@ -755,11 +777,13 @@ class ComfySession:
         output = output.expanduser().resolve()
         if output.suffix.lower() != ".mp4":
             raise GenerationError("output path must end in .mp4")
-        source = image.expanduser().resolve() if image is not None else None
-        if source is not None and not source.is_file():
-            raise GenerationError(f"input image does not exist: {source}")
-        if source == output:
-            raise GenerationError("input image and output path must be different")
+        sources = [path.expanduser().resolve() if path is not None else None
+                   for path in (image, last_image)]
+        for source in sources:
+            if source is not None and not source.is_file():
+                raise GenerationError(f"input image does not exist: {source}")
+            if source == output:
+                raise GenerationError("input image and output path must be different")
         if duration_seconds not in SUPPORTED_DURATION_SECONDS:
             supported = ", ".join(str(value) for value in SUPPORTED_DURATION_SECONDS)
             raise GenerationError(f"duration must be one of: {supported} seconds")
@@ -767,36 +791,32 @@ class ComfySession:
         selected_seed = seed if seed is not None else _random_seed()
 
         job_token = uuid.uuid4().hex
-        prepared_image: Path | None = None
-        if source is None:
-            workflow = _workflow(
-                image_name=None,
-                prompt=cleaned_prompt,
-                seed=selected_seed,
-                duration_seconds=duration_seconds,
-                filename_prefix=f"job-{job_token}",
-                model=model,
-                width=width,
-                height=height,
-            )
-        else:
-            if shutil.which("ffmpeg") is None:
-                raise GenerationError("ffmpeg is required but was not found on PATH")
-            prepared_image = self.input_directory / f"{job_token}.png"
-            _prepare_image(source, prepared_image, width, height)
-            workflow = _workflow(
-                image_name=prepared_image.name,
-                prompt=cleaned_prompt,
-                seed=selected_seed,
-                duration_seconds=duration_seconds,
-                filename_prefix=f"job-{job_token}",
-                model=model,
-                width=width,
-                height=height,
-            )
-        if checkpoint_directory is not None:
-            workflow = _resumable_workflow(workflow, checkpoint_directory)
+        prepared_images: list[Path] = []
         try:
+            if any(sources) and shutil.which("ffmpeg") is None:
+                raise GenerationError("ffmpeg is required but was not found on PATH")
+            image_names = []
+            for index, source in enumerate(sources):
+                if source is None:
+                    image_names.append(None)
+                    continue
+                prepared = self.input_directory / f"{job_token}-{index}.png"
+                prepared_images.append(prepared)
+                _prepare_image(source, prepared, width, height)
+                image_names.append(prepared.name)
+            workflow = _workflow(
+                image_name=image_names[0],
+                last_image_name=image_names[1],
+                prompt=cleaned_prompt,
+                seed=selected_seed,
+                duration_seconds=duration_seconds,
+                filename_prefix=f"job-{job_token}",
+                model=model,
+                width=width,
+                height=height,
+            )
+            if checkpoint_directory is not None:
+                workflow = _resumable_workflow(workflow, checkpoint_directory)
             generated = _generate(
                 self.process,
                 self.base_url,
@@ -823,8 +843,8 @@ class ComfySession:
                 raise
             raise error from exc
         finally:
-            if prepared_image is not None:
-                prepared_image.unlink(missing_ok=True)
+            for prepared in prepared_images:
+                prepared.unlink(missing_ok=True)
 
     def close(self) -> None:
         process, self.process = self.process, None

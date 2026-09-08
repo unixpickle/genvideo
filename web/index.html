@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#0b0d12">
     <title>Genvideo Queue</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=9">
-    <script src="/assets/app.js?v=9" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=11">
+    <script src="/assets/app.js?v=11" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -42,7 +42,7 @@
             </label>
             <label>
               <input type="radio" name="mode" value="image">
-              <span>Start with image</span>
+              <span>Use images</span>
             </label>
           </fieldset>
 
@@ -88,21 +88,45 @@
               <span class="field-count">0 / 8000</span>
             </div>
 
-            <p class="structured-note">Fill at least one prompt field. Fields are serialized in H3's required order. Image mode automatically inserts and maintains the <code>&lt;Picture 1&gt;</code> first-frame alignment instruction.</p>
+            <p class="structured-note">Fill at least one prompt field. Fields are serialized in H3's required order. Image mode automatically aligns the supplied images with the first and/or last frame. With both images, <code>&lt;Picture 1&gt;</code> is the start and <code>&lt;Picture 2&gt;</code> is the end; with one image, it is <code>&lt;Picture 1&gt;</code>.</p>
           </div>
 
           <div id="image-field" class="image-field" hidden>
-            <label class="field-label" for="image">Starting image</label>
-            <label class="upload-box" id="upload-box" for="image">
-              <input id="image" name="image" type="file" accept="image/*">
-              <img id="image-preview" alt="Selected starting frame" hidden>
-              <span class="upload-empty" id="upload-empty">
-                <span class="upload-icon" aria-hidden="true">＋</span>
-                <strong>Choose a photo</strong>
-                <small>Any aspect ratio · up to 32 MB</small>
-              </span>
-              <button class="change-image" id="change-image" type="button" hidden>Change</button>
-            </label>
+            <p class="frame-help">Choose a start frame, an end frame, or both.</p>
+            <div class="frame-inputs">
+              <div class="frame-input">
+                <label class="field-label" for="image">Start frame <span>optional</span></label>
+                <label class="upload-box" id="upload-box" for="image">
+                  <input id="image" name="image" type="file" accept="image/*">
+                  <img id="image-preview" class="image-preview" alt="Selected start frame" hidden>
+                  <span class="upload-empty" id="upload-empty">
+                    <span class="upload-icon" aria-hidden="true">＋</span>
+                    <strong>Choose start frame</strong>
+                    <small>Any aspect ratio · up to 32 MB</small>
+                  </span>
+                </label>
+                <div class="image-actions">
+                  <button id="change-image" class="change-image" type="button" hidden>Change</button>
+                  <button id="remove-image" class="change-image" type="button" hidden>Remove</button>
+                </div>
+              </div>
+              <div class="frame-input">
+                <label class="field-label" for="last-image">End frame <span>optional</span></label>
+                <label class="upload-box" id="last-upload-box" for="last-image">
+                  <input id="last-image" name="last_image" type="file" accept="image/*">
+                  <img id="last-image-preview" class="image-preview" alt="Selected end frame" hidden>
+                  <span class="upload-empty" id="last-upload-empty">
+                    <span class="upload-icon" aria-hidden="true">＋</span>
+                    <strong>Choose end frame</strong>
+                    <small>Any aspect ratio · up to 32 MB</small>
+                  </span>
+                </label>
+                <div class="image-actions">
+                  <button id="last-change-image" class="change-image" type="button" hidden>Change</button>
+                  <button id="last-remove-image" class="change-image" type="button" hidden>Remove</button>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="output-fields">

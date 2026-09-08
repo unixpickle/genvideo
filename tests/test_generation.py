@@ -4,6 +4,17 @@ import generation
 
 
 class H3PromptTests(unittest.TestCase):
+    def test_end_frame_alignment_uses_image_order_and_snapped_duration(self):
+        for first in (False, True):
+            with self.subTest(first=first):
+                prompt = generation.build_h3_prompt(
+                    "The subject turns.", image_mode=first, last_frame=True,
+                    duration_seconds=5,
+                )
+                self.assertIn("at 5.12 seconds", prompt)  # Frame 123 of 124, at 24 fps.
+                self.assertIn(f"<Picture {2 if first else 1}> is fully referenced as the last frame", prompt)
+                self.assertEqual("at 0.00 seconds" in prompt, first)
+
     def test_serializes_only_present_fields_in_official_order(self):
         prompt = generation.build_h3_prompt(
             "[Shot 1] A glass bird takes flight.",
@@ -58,6 +69,29 @@ class CanvasTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_each_frame_combination_links_only_selected_images(self):
+        for model in generation.SUPPORTED_MODELS:
+            for first, last in ((True, False), (False, True), (True, True), (False, False)):
+                with self.subTest(model=model, first=first, last=last):
+                    workflow = generation._workflow(
+                        image_name="start.png" if first else None,
+                        last_image_name="end.png" if last else None,
+                        prompt="A bird", seed=123, model=model,
+                    )
+                    inputs = next(node["inputs"] for node in workflow.values()
+                                  if node["class_type"] == "GenVideoMiniMaxH3Conditioning")
+                    for present, key, filename in ((first, "first_frame", "start.png"),
+                                                   (last, "last_frame", "end.png")):
+                        self.assertEqual(key in inputs, present)
+                        if present:
+                            self.assertEqual(workflow[inputs[key][0]]["inputs"]["image"], filename)
+                    self.assertEqual(sum(node["class_type"] == "LoadImage" for node in workflow.values()),
+                                     int(first) + int(last))
+                    for node in workflow.values():
+                        for value in node["inputs"].values():
+                            if isinstance(value, list):
+                                self.assertIn(value[0], workflow)
+
     def test_workflow_applies_duration_canvas_and_text_mode(self):
         prompt = generation.build_h3_prompt("[Shot 1] A glass bird takes flight.")
         workflow = generation._workflow(

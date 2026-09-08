@@ -176,7 +176,7 @@ textarea::placeholder, input::placeholder { color: #596172; }
 .upload-empty strong { color: var(--text); font-size: 14px; }
 .upload-empty small { font-size: 11px; }
 .upload-icon { width: 42px; height: 42px; display: grid; place-items: center; margin-bottom: 4px; border-radius: 50%; color: var(--accent); background: var(--accent-dark); font-size: 23px; }
-#image-preview { width: 100%; max-height: 340px; object-fit: contain; background: #080a0f; }
+.image-preview { width: 100%; max-height: 340px; object-fit: contain; background: #080a0f; }
 .change-image { position: absolute; right: 10px; bottom: 10px; min-height: 38px; padding: 0 14px; border: 1px solid rgba(255,255,255,.2); border-radius: 999px; color: white; background: rgba(10,12,17,.78); backdrop-filter: blur(8px); }
 
 .advanced { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 15px; }
@@ -317,4 +317,12 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
   .structured-heading { flex-wrap: wrap; }
   .section-heading { flex-wrap: wrap; }
   .job-actions a, .job-actions button, .job-priority select { min-height: 44px; }
+}
+
+.frame-help { color: var(--muted); font-size: 13px; }
+.frame-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.image-actions { display: flex; gap: 8px; margin-top: 8px; }
+.image-actions .change-image { position: static; }
+@media (max-width: 540px) {
+  .frame-inputs { grid-template-columns: 1fr; }
 }

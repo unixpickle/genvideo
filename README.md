@@ -16,11 +16,13 @@ Completed MP4s and queue state are stored in `web_outputs/` by default.
 
 ## Create a generation
 
-Choose **Text only** or **Start with image**, then fill at least one H3 prompt
+Choose **Text only** or **Use images**, then fill at least one H3 prompt
 field: integrated multimodal description, overall soundscape, or non-diegetic
 music. Empty fields are omitted, and the app serializes the fields in H3's
-required order. Image jobs automatically prepend the `<Picture 1>` instruction
-aligning the supplied image with the first frame. Images may have any
+required order. In image mode, supply a **Start frame**, an **End frame**, or both. Each image
+has its own preview, change, and remove controls. The app automatically adds
+frame-alignment instructions: with both images, `<Picture 1>` is the start and
+`<Picture 2>` is the end; a lone start or end image is `<Picture 1>`. Images may have any
 dimensions; they are scaled to cover the output canvas and center-cropped
 without distortion.
 
@@ -35,9 +37,11 @@ memory-saving or native 768p canvas and an aspect ratio of `21:9`, `16:9`,
 `4:3`, `1:1`, `3:4`, or `9:16`. Canvases are aligned to 32 pixels and capped
 to H3's local 7:4 pixel budget; the app shows the exact dimensions.
 
-Every job shows its full compiled prompt and starting image. **Copy to form**
-loads any current or historical job's prompt fields, output settings, exact
-seed, and starting image into the composer for editing. Submitting creates a
+Every job shows its full compiled prompt and any start/end images. **Copy to form**
+loads any current or historical job's prompt fields, model, duration, resolution,
+aspect ratio, priority, exact seed, and both images into the composer for editing.
+Settings are still copied if an image cannot be loaded; the form identifies any
+missing images so you can replace them before submitting. Submitting creates a
 separate job. Older LTX prompts can also be copied into an H3 form; their model
 selection defaults to H3 Turbo.
 
