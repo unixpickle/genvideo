@@ -11,14 +11,14 @@ import generation
 
 
 class SamplerTests(unittest.TestCase):
-    def test_resume_every_boundary_matches_comfy_multistep(self):
+    def test_resume_every_boundary_matches_comfy_samplers(self):
         # Run the installed upstream solver as the reference without importing
         # ComfyUI's model/GPU initialization into the web test process.
         source = ast.parse((generation.COMFY_DIR / "comfy/k_diffusion/sampling.py").read_text())
         functions = []
         for node in source.body:
             if isinstance(node, ast.FunctionDef) and node.name in {
-                "res_multistep", "get_ancestral_step", "to_d",
+                "res_multistep", "sample_euler", "get_ancestral_step", "to_d",
             }:
                 node.decorator_list = []
                 functions.append(node)
@@ -40,12 +40,14 @@ class SamplerTests(unittest.TestCase):
                 self.calls += 1
                 return torch.sin(x) * 0.3 + sigma.reshape(-1, 1) * 0.2
 
-        for steps in (4, 20):
+        for sampler_name, steps in (("res_multistep", 4), ("res_multistep", 20), ("euler", 6)):
             sigmas = torch.linspace(1.0, 0, steps + 1)
             noise = torch.randn((1, 32), generator=torch.Generator().manual_seed(7))
-            reference = namespace["res_multistep"](Model(), noise.clone(), sigmas, eta=0)
+            reference_fn = namespace["sample_euler" if sampler_name == "euler" else "res_multistep"]
+            kwargs = {} if sampler_name == "euler" else {"eta": 0}
+            reference = reference_fn(Model(), noise.clone(), sigmas, **kwargs)
             for boundary in range(1, steps + 1):
-                with self.subTest(steps=steps, boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                with self.subTest(sampler=sampler_name, steps=steps, boundary=boundary), tempfile.TemporaryDirectory() as tmp:
                     path = Path(tmp) / "sampler.pt"
 
                     def interrupt(event):
@@ -54,10 +56,11 @@ class SamplerTests(unittest.TestCase):
 
                     with self.assertRaises(InterruptedError):
                         sample_resumable(Model(), noise.clone(), sigmas,
-                                         callback=interrupt, checkpoint_path=path)
+                                         callback=interrupt, checkpoint_path=path,
+                                         sampler_name=sampler_name)
                     resumed_model = Model()
                     resumed = sample_resumable(resumed_model, noise.clone(), sigmas,
-                                               checkpoint_path=path)
+                                               checkpoint_path=path, sampler_name=sampler_name)
                     self.assertTrue(torch.equal(reference, resumed))
                     self.assertEqual(resumed_model.calls, steps - boundary)
 
@@ -81,8 +84,34 @@ class SamplerTests(unittest.TestCase):
                 sample_resumable(lambda x, sigma: x, torch.ones(1, 2),
                                  torch.tensor([1., .6, 0.]), checkpoint_path=path)
 
+    def test_sampler_mismatch_rejected_and_legacy_checkpoint_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sampler.pt"
+            sigmas = torch.tensor([1., .5, 0.])
+            model = lambda x, sigma: x * .5
+            noise = torch.ones(1, 2)
+            expected = sample_resumable(model, noise, sigmas, checkpoint_path=path)
+            state = load_state(path)
+            del state["sampler_name"]  # Existing saved jobs predate this field.
+            atomic_save(state, path)
+            with self.assertRaisesRegex(ValueError, "sampler"):
+                sample_resumable(model, noise, sigmas, checkpoint_path=path, sampler_name="euler")
+            actual = sample_resumable(model, noise, sigmas, checkpoint_path=path)
+            self.assertTrue(torch.equal(actual, expected))
+
 
 class ResumeWorkflowTests(unittest.TestCase):
+    def test_resumption_retains_selected_sampler(self):
+        for model, sampler in (("minimax-h3", "res_multistep"),
+                               ("minimax-h3-larry-v4", "euler"),
+                               ("minimax-h3-base", "res_multistep")):
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as tmp:
+                workflow = generation._resumable_workflow(
+                    generation._workflow(None, "A bird", 12, model=model), Path(tmp))
+                inputs = next(n["inputs"] for n in workflow.values()
+                              if n["class_type"] == "GenVideoResumableSampler")
+                self.assertEqual(inputs["sampler_name"], sampler)
+
     def workflow(self, directory):
         return generation._resumable_workflow(generation._workflow(
             image_name="input.png", prompt="A bird", seed=12), directory)

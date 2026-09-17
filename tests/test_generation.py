@@ -69,8 +69,35 @@ class CanvasTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_model_presets_select_lora_steps_and_sampler(self):
+        presets = (
+            ("minimax-h3", "LoraLoaderModelOnly", 4, "res_multistep",
+             "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"),
+            ("minimax-h3-larry-v4", "MiniMaxH3TurboLoRA", 6, "euler",
+             "minimax_h3_turbo_v4_step600_ema.safetensors"),
+            ("minimax-h3-base", None, 20, "res_multistep", None),
+        )
+        for model, loader, steps, sampler, filename in presets:
+            with self.subTest(model=model):
+                workflow = generation._workflow(None, "A bird", 123, model=model)
+                schedule = next(n["inputs"] for n in workflow.values()
+                                if n["class_type"] == "BasicScheduler")
+                self.assertEqual(schedule["steps"], steps)
+                self.assertEqual(schedule["scheduler"], "simple")
+                selected = next(n["inputs"] for n in workflow.values()
+                                if n["class_type"] == "KSamplerSelect")
+                self.assertEqual(selected["sampler_name"], sampler)
+                loras = [n for n in workflow.values() if "lora_name" in n["inputs"]]
+                self.assertEqual(len(loras), int(loader is not None))
+                if loader:
+                    self.assertEqual(loras[0]["class_type"], loader)
+                    self.assertEqual(loras[0]["inputs"]["lora_name"], filename)
+                if model == "minimax-h3-larry-v4":
+                    self.assertEqual(loras[0]["inputs"]["strength"], 1.0)
+                    self.assertFalse(loras[0]["inputs"]["low_vram"])
+
     def test_each_frame_combination_links_only_selected_images(self):
-        for model in generation.SUPPORTED_MODELS:
+        for model in (m for m in generation.SUPPORTED_MODELS if m != generation.REF2VA_MODEL):
             for first, last in ((True, False), (False, True), (True, True), (False, False)):
                 with self.subTest(model=model, first=first, last=last):
                     workflow = generation._workflow(

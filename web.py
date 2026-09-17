@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from aiohttp import web
+from ref2va import (REF2VA_MODEL, REF_FIELDS, MAX_REFERENCE_BYTES, MAX_REFERENCES,
+                    validate_references, probe_reference, validate_durations,
+                    reference_labels, build_ref2va_prompt)
 
 from generation import (
     DEFAULT_ASPECT_RATIO,
@@ -65,6 +68,8 @@ class Job:
     image_content_type: str | None = None
     last_upload_path: Path | None = None
     last_image_content_type: str | None = None
+    references: list[dict] = field(default_factory=list)
+    reference_builder: dict = field(default_factory=dict)
     priority: str = "medium"
     queue_order: int = 0
     progress: dict[str, Any] = field(default_factory=dict)
@@ -86,6 +91,8 @@ class Job:
             "resolution": self.resolution,
             "aspect_ratio": self.aspect_ratio,
             "structured_prompt": self.structured_prompt,
+            "references": self.references,
+            "reference_builder": self.reference_builder,
             "output_filename": self.output_path.name,
             "upload_filename": (
                 self.upload_path.name if self.upload_path is not None else None
@@ -121,6 +128,10 @@ class Job:
             "canvas_width": canvas_width,
             "canvas_height": canvas_height,
             "structured_prompt": self.structured_prompt,
+            "reference_builder": self.reference_builder,
+            "references": [dict(ref, url=f"/reference-media/{self.id}/{ref['id']}",
+                                labels=reference_labels(self.references)[ref["id"]])
+                           for ref in self.references],
             "priority": self.priority,
             "queue_order": self.queue_order,
             "progress": self.progress,
@@ -233,6 +244,11 @@ class QueueManager:
                 for key, value in structured_prompt.items()
             ):
                 raise ValueError(f"invalid structured prompt in {self.state_path}")
+            references = record.get("references", [])
+            for ref in references:
+                filename = ref.get("filename", "")
+                if not filename or Path(filename).name != filename or filename in {".", ".."}:
+                    raise ValueError("invalid reference filename")
             job = Job(
                 id=str(record["id"]),
                 prompt=str(record["prompt"]),
@@ -245,6 +261,8 @@ class QueueManager:
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
                 structured_prompt=structured_prompt,
+                references=references,
+                reference_builder=record.get("reference_builder", {}),
                 output_path=self.output_directory / output_filename,
                 upload_path=(
                     self.upload_directory / upload_filename
@@ -293,6 +311,10 @@ class QueueManager:
                         "A conditioning image was lost before this job could resume."
                     )
                     job.finished_at = time.time()
+                elif job.mode == "ref2va" and not self._references_available(job):
+                    job.status = "failed"
+                    job.error = "Reference media was lost before this job could resume."
+                    job.finished_at = time.time()
                 else:
                     if job.status != "paused":
                         job.status = "queued"
@@ -327,6 +349,8 @@ class QueueManager:
         priority: str = "medium",
         last_upload_path: Path | None = None,
         last_image_content_type: str | None = None,
+        references: list[dict] | None = None,
+        reference_builder: dict | None = None,
     ) -> Job:
         if priority not in PRIORITIES:
             raise ValueError(f"unsupported priority: {priority}")
@@ -349,6 +373,8 @@ class QueueManager:
             resolution=resolution,
             aspect_ratio=aspect_ratio,
             structured_prompt=structured_prompt,
+            references=references or [],
+            reference_builder=reference_builder or {},
             upload_path=upload_path,
             image_content_type=image_content_type,
             last_upload_path=last_upload_path,
@@ -372,6 +398,7 @@ class QueueManager:
             raise web.HTTPConflict(text="this legacy LTX-2.5 job cannot be regenerated")
 
         copied_uploads: list[Path | None] = [None, None]
+        references = []
         try:
             if original.mode == "image":
                 paths = (original.upload_path, original.last_upload_path)
@@ -383,6 +410,13 @@ class QueueManager:
                     if path is not None:
                         copied_uploads[index] = self.upload_directory / f"{uuid.uuid4().hex}.upload"
                         shutil.copyfile(path, copied_uploads[index])
+            if original.mode == "ref2va" and not self._references_available(original):
+                raise web.HTTPConflict(text="reference media is no longer available")
+            for ref in original.references:
+                destination = self.upload_directory / f"{uuid.uuid4().hex}.upload"
+                copied_uploads.append(destination)
+                shutil.copyfile(self.upload_directory / ref["filename"], destination)
+                references.append(dict(ref, filename=destination.name))
             return self.add(
                 original.prompt,
                 original.structured_prompt.copy(),
@@ -397,12 +431,18 @@ class QueueManager:
                 original.priority,
                 copied_uploads[1],
                 original.last_image_content_type,
+                references,
+                original.reference_builder.copy(),
             )
         except BaseException:
             for path in copied_uploads:
                 if path is not None:
                     path.unlink(missing_ok=True)
             raise
+
+    def _references_available(self, job):
+        return bool(job.references) and all((self.upload_directory / r["filename"]).is_file()
+                                            for r in job.references)
 
     def _next_order(self) -> int:
         return max((job.queue_order for job in self.jobs.values()), default=-1) + 1
@@ -451,6 +491,30 @@ class QueueManager:
         self.wake.set()
         return job
 
+    def retry(self, job_id: str) -> Job:
+        job = self._job(job_id)
+        if job.status != "failed":
+            raise web.HTTPConflict(text="only failed jobs can be retried")
+        if job.model not in SUPPORTED_MODELS:
+            raise web.HTTPConflict(text="this legacy LTX-2.5 job cannot be retried")
+        if job.mode == "image":
+            paths = (job.upload_path, job.last_upload_path)
+            if not any(paths) or any(path is not None and not path.is_file() for path in paths):
+                raise web.HTTPConflict(
+                    text="a conditioning image for this job is no longer available"
+                )
+        if job.mode == "ref2va" and not self._references_available(job):
+            raise web.HTTPConflict(text="reference media is no longer available")
+        job.status = "queued"
+        job.queue_order = self._next_order()
+        job.error = None
+        job.progress = {}
+        job.started_at = None
+        job.finished_at = None
+        self._save_state()
+        self.wake.set()
+        return job
+
     def edit(self, job_id: str, changes: dict[str, Any]) -> Job:
         job = self._job(job_id)
         if job.status not in {"queued", "running", "paused"}:
@@ -492,6 +556,8 @@ class QueueManager:
         for path in (job.upload_path, job.last_upload_path):
             if path is not None:
                 path.unlink(missing_ok=True)
+        for ref in job.references:
+            (self.upload_directory / ref["filename"]).unlink(missing_ok=True)
         job.output_path.unlink(missing_ok=True)
         for staging in self.output_directory.glob(f".{job.output_path.name}.*.tmp"):
             staging.unlink(missing_ok=True)
@@ -525,6 +591,8 @@ class QueueManager:
             "upload_path": str(job.upload_path) if job.upload_path else None,
             "last_upload_path": str(job.last_upload_path) if job.last_upload_path else None,
             "memory_limit": self.memory_limit,
+            "references": [dict(ref, path=str(self.upload_directory / ref["filename"]))
+                           for ref in job.references],
         }
         (directory / "request.json").write_text(json.dumps(spec))
         self.active_job = job
@@ -643,14 +711,29 @@ async def create_job(request: web.Request) -> web.Response:
         "duration",
         "resolution",
         "aspect_ratio",
-        "priority",
+        "priority", "references", "reference_builder", *REF_FIELDS,
     }
     received: dict[str, str] = {}
     try:
         if request.content_type.startswith("multipart/"):
             reader = await request.multipart()
             async for part in reader:
-                if part.name in staged_uploads and part.filename:
+                if part.name and part.name.startswith("reference_") and part.filename:
+                    if part.name in staged_uploads or sum(k.startswith("reference_") for k in staged_uploads) >= MAX_REFERENCES:
+                        raise web.HTTPBadRequest(text="duplicate or too many reference uploads")
+                    path = manager.upload_directory / f"{uuid.uuid4().hex}.upload"
+                    staged_uploads[part.name] = path
+                    size = 0
+                    with path.open("wb") as output:
+                        while chunk := await part.read_chunk(1024 * 1024):
+                            size += len(chunk)
+                            if size > MAX_REFERENCE_BYTES:
+                                raise web.HTTPRequestEntityTooLarge(max_size=MAX_REFERENCE_BYTES, actual_size=size)
+                            output.write(chunk)
+                    if not size:
+                        raise web.HTTPBadRequest(text="reference file is empty")
+                    received[part.name] = part.headers.get("Content-Type", "application/octet-stream")
+                elif part.name in staged_uploads and part.filename:
                     if part.name in received:
                         raise web.HTTPBadRequest(text="provide only one file per frame")
                     image_content_type = part.headers.get("Content-Type") or ""
@@ -670,7 +753,10 @@ async def create_job(request: web.Request) -> web.Response:
                     else:
                         staged_uploads[part.name].unlink(missing_ok=True)
                 elif part.name in accepted_fields:
-                    text_fields[part.name] = (await part.text()).strip()
+                    raw = await part.read()
+                    if len(raw) > 100_000:
+                        raise web.HTTPBadRequest(text="form field is too large")
+                    text_fields[part.name] = raw.decode("utf-8").strip()
         else:
             fields = await request.post()
             text_fields = {
@@ -695,10 +781,14 @@ async def create_job(request: web.Request) -> web.Response:
         if priority not in PRIORITIES:
             raise web.HTTPBadRequest(text="priority must be low, medium, or high")
 
-        if mode not in {"text", "image"}:
-            raise web.HTTPBadRequest(text="mode must be text or image")
+        if mode not in {"text", "image", "ref2va"}:
+            raise web.HTTPBadRequest(text="mode must be text, image, or ref2va")
+        if (mode == "ref2va") != (model == REF2VA_MODEL):
+            raise web.HTTPBadRequest(text="Ref2VA mode requires a Ref2VA model, and vice versa")
         if model not in SUPPORTED_MODELS:
             raise web.HTTPBadRequest(text="unsupported model")
+        if mode != "ref2va" and any(k.startswith("reference_") for k in received):
+            raise web.HTTPBadRequest(text="reference files require Ref2VA mode")
         if mode == "image" and not received:
             raise web.HTTPBadRequest(text="a start or end image is required in image mode")
         if mode == "text":
@@ -727,25 +817,41 @@ async def create_job(request: web.Request) -> web.Response:
         except GenerationError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
-        try:
-            prompt = build_h3_prompt(
-                integrated_description,
-                overall_soundscape,
-                non_diegetic_music,
-                image_mode="image" in received,
-                last_frame="last_image" in received,
-                duration_seconds=duration_seconds,
-            )
-        except GenerationError as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        if len(prompt) > 8000:
-            raise web.HTTPBadRequest(text="combined H3 prompt must be 8,000 characters or fewer")
-
-        structured_prompt = {
-            "integrated_multimodal_description": integrated_description,
-            "overall_soundscape": overall_soundscape,
-            "non_diegetic_music": non_diegetic_music,
-        }
+        references, reference_builder = [], {}
+        if mode == "ref2va":
+            if "image" in received or "last_image" in received:
+                raise web.HTTPBadRequest(text="Use reference attachments in Ref2VA mode")
+            try:
+                references = validate_references(json.loads(text_fields.get("references", "[]")))
+                expected = {f"reference_{r['id']}" for r in references}
+                if expected != set(received):
+                    raise ValueError("Every reference must have exactly one matching upload.")
+                for ref in references:
+                    key = f"reference_{ref['id']}"
+                    ref["filename"] = staged_uploads[key].name
+                    ref["content_type"] = received[key]
+                    await asyncio.to_thread(probe_reference, staged_uploads[key], ref)
+                validate_durations(references)
+                reference_builder = json.loads(text_fields.get("reference_builder", "{}"))
+                if not isinstance(reference_builder, dict):
+                    raise ValueError("Invalid prompt builder state")
+                structured_prompt = {name: text_fields.get(name, "") for name in REF_FIELDS}
+                prompt = build_ref2va_prompt(structured_prompt, references)
+            except (ValueError, TypeError) as exc:
+                raise web.HTTPBadRequest(text=str(exc)) from exc
+        else:
+            structured_prompt = {
+                "integrated_multimodal_description": integrated_description,
+                "overall_soundscape": overall_soundscape,
+                "non_diegetic_music": non_diegetic_music,
+            }
+            try:
+                prompt = build_h3_prompt(**structured_prompt, image_mode="image" in received,
+                                         last_frame="last_image" in received, duration_seconds=duration_seconds)
+            except GenerationError as exc:
+                raise web.HTTPBadRequest(text=str(exc)) from exc
+            if len(prompt) > 8000:
+                raise web.HTTPBadRequest(text="combined H3 prompt must be 8,000 characters or fewer")
 
         job = manager.add(
             prompt,
@@ -761,6 +867,8 @@ async def create_job(request: web.Request) -> web.Response:
             priority,
             staged_uploads["last_image"] if "last_image" in received else None,
             received.get("last_image"),
+            references,
+            reference_builder,
         )
         return web.json_response(job.as_dict(), status=201)
     except BaseException:
@@ -786,6 +894,11 @@ async def pause_job(request: web.Request) -> web.Response:
 
 async def resume_job(request: web.Request) -> web.Response:
     job = _manager(request).resume(request.match_info["job_id"])
+    return web.json_response(job.as_dict())
+
+
+async def retry_job(request: web.Request) -> web.Response:
+    job = _manager(request).retry(request.match_info["job_id"])
     return web.json_response(job.as_dict())
 
 
@@ -819,6 +932,19 @@ async def prompt_image(request: web.Request) -> web.FileResponse:
     return web.FileResponse(path, headers=headers)
 
 
+async def reference_media(request: web.Request) -> web.FileResponse:
+    manager = _manager(request)
+    job = manager.jobs.get(request.match_info["job_id"])
+    ref = next((r for r in job.references if r["id"] == request.match_info["ref_id"]), None) if job else None
+    if ref is None:
+        raise web.HTTPNotFound()
+    path = manager.upload_directory / ref["filename"]
+    if not path.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={"Content-Type": ref["content_type"],
+        "Content-Security-Policy": "default-src 'none'; sandbox", "X-Content-Type-Options": "nosniff"})
+
+
 async def media(request: web.Request) -> web.FileResponse:
     filename = request.match_info["filename"]
     if Path(filename).name != filename or not filename.endswith(".mp4"):
@@ -831,7 +957,7 @@ async def media(request: web.Request) -> web.FileResponse:
 
 def make_app(output_directory: Path, memory_limit: float = 56.0) -> web.Application:
     manager = QueueManager(output_directory.resolve(), memory_limit)
-    app = web.Application(client_max_size=2 * MAX_UPLOAD_BYTES + 1024 * 1024)
+    app = web.Application(client_max_size=MAX_REFERENCES * MAX_REFERENCE_BYTES + 1024 * 1024)
     app[MANAGER_KEY] = manager
 
     async def startup(_: web.Application) -> None:
@@ -849,9 +975,11 @@ def make_app(output_directory: Path, memory_limit: float = 56.0) -> web.Applicat
     app.router.add_delete("/api/jobs/{job_id}", delete_job)
     app.router.add_post("/api/jobs/{job_id}/pause", pause_job)
     app.router.add_post("/api/jobs/{job_id}/resume", resume_job)
+    app.router.add_post("/api/jobs/{job_id}/retry", retry_job)
     app.router.add_patch("/api/jobs/{job_id}", edit_job)
     app.router.add_get("/prompt-images/{job_id}", prompt_image)
     app.router.add_get("/prompt-images/{job_id}/{frame:last}", prompt_image)
+    app.router.add_get("/reference-media/{job_id}/{ref_id}", reference_media)
     app.router.add_get("/media/{filename}", media)
     app.router.add_static("/assets", WEB_DIR, append_version=True)
     return app

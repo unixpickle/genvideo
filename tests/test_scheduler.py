@@ -146,6 +146,26 @@ time.sleep(300)
         self.assertIsNotNone(job.finished_at)
         self.assertTrue(job.as_dict()["media_url"])
 
+    async def test_failed_worker_can_retry_and_complete(self):
+        job = self.add()
+        self.start_fake_worker()
+        await self.until(lambda: job.progress.get("step") == 2)
+        directory = self.manager.work_directory / job.id
+        (directory / "result.json").write_text(json.dumps({"ok": False, "error": "memory limit"}))
+        await self.until(lambda: self.manager.active_job is None)
+        self.assertEqual(job.status, "failed")
+        self.assertTrue((directory / "sampler.pt").is_file())
+
+        self.manager.retry(job.id)
+        await self.until(lambda: job.status == "running" and job.progress.get("step") == 2)
+        self.assertFalse((directory / "result.json").exists())
+        job.output_path.write_bytes(b"mp4")
+        (directory / "result.json").write_text(json.dumps({"ok": True}))
+        await self.until(lambda: self.manager.active_job is None)
+        self.assertEqual(job.status, "completed")
+        self.assertIsNone(job.error)
+        self.assertFalse(directory.exists())
+
     async def test_invalid_edit_does_not_change_job(self):
         job = self.add()
         for change in ({"priority": "urgent"}, {"move": "first"}, {"priority": []}, {}):

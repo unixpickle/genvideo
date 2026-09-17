@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import gc
 import logging
+import json
+import math
+import subprocess
 from pathlib import Path
 
+import numpy as np
+from PIL import Image, ImageOps
 import torch
 import comfy.samplers
 import comfy.nested_tensor
@@ -129,6 +134,66 @@ def to_cpu(value):
     return value
 
 
+class GenVideoMiniMaxH3ReferenceConditioning(GenVideoMiniMaxH3Conditioning):
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = super().INPUT_TYPES()
+        inputs["required"].update(audio_vae=("VAE",), references_json=("STRING",))
+        inputs["optional"].pop("first_frame")
+        inputs["optional"].pop("last_frame")
+        return inputs
+
+    @staticmethod
+    def _audio(path):
+        data = subprocess.run([
+            "ffmpeg", "-v", "error", "-i", str(path), "-t", "15", "-vn",
+            "-ac", "2", "-ar", "32000", "-f", "f32le", "pipe:1",
+        ], capture_output=True, check=True, timeout=90).stdout
+        samples = np.frombuffer(data, dtype=np.float32).copy().reshape(-1, 2)
+        return {"waveform": torch.from_numpy(samples.T).unsqueeze(0), "sample_rate": 32000}
+
+    def encode_and_release(self, clip, vae, audio_vae, prompt, width, height,
+                           length, references_json, checkpoint_directory=""):
+        images, videos, soundtracks, audios = {}, {}, {}, {}
+        try:
+            for ref in json.loads(references_json):
+                path = Path(ref["path"])
+                if ref["kind"] == "image":
+                    with Image.open(path) as source:
+                        img = ImageOps.exif_transpose(source).convert("RGB")
+                        scale = min(1, math.sqrt(width * height / (img.width * img.height)))
+                        img = img.resize((max(32, round(img.width * scale / 32) * 32),
+                                          max(32, round(img.height * scale / 32) * 32)))
+                        images[f"ref_image_{len(images)}"] = torch.from_numpy(
+                            np.asarray(img).copy()).float().unsqueeze(0) / 255
+                elif ref["kind"] == "video":
+                    scale = min(1, math.sqrt(width * height / (ref["width"] * ref["height"])))
+                    w = max(32, round(ref["width"] * scale / 32) * 32)
+                    h = max(32, round(ref["height"] * scale / 32) * 32)
+                    data = subprocess.run([
+                        "ffmpeg", "-v", "error", "-i", str(path), "-t", "15", "-an",
+                        "-vf", f"fps=24,scale={w}:{h}", "-frames:v", str(length),
+                        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+                    ], capture_output=True, check=True, timeout=90).stdout
+                    index = len(videos)
+                    videos[f"ref_video_{index}"] = torch.from_numpy(
+                        np.frombuffer(data, dtype=np.uint8).copy().reshape(-1, h, w, 3)).float() / 255
+                    if ref.get("use_audio"):
+                        soundtracks[f"ref_video_audio_{index}"] = self._audio(path)
+                else:
+                    audios[f"ref_audio_{len(audios)}"] = self._audio(path)
+            result = nodes_minimax_h3.MiniMaxH3ReferenceToVideo.execute(
+                clip, vae, audio_vae, prompt, width, height, length,
+                ref_images=images, ref_videos=videos, ref_video_audios=soundtracks, ref_audios=audios,
+            )
+            conditioning, latent = result[0], result[1]
+        finally:
+            self._release_clip(clip)
+        if checkpoint_directory:
+            atomic_save(to_cpu((conditioning, latent)), Path(checkpoint_directory) / "conditioning.pt")
+        return (conditioning, latent)
+
+
 class GenVideoLoadConditioning:
     @classmethod
     def INPUT_TYPES(cls):
@@ -157,15 +222,18 @@ class GenVideoResumableSampler:
             "noise": ("NOISE",), "guider": ("GUIDER",),
             "sigmas": ("SIGMAS",), "latent_image": ("LATENT",),
             "checkpoint_directory": ("STRING",),
+            "sampler_name": (["res_multistep", "euler"], {"default": "res_multistep"}),
         }}
 
     RETURN_TYPES = ("LATENT", "LATENT")
     FUNCTION = "sample"
     CATEGORY = "genvideo"
 
-    def sample(self, noise, guider, sigmas, latent_image, checkpoint_directory):
+    def sample(self, noise, guider, sigmas, latent_image, checkpoint_directory,
+               sampler_name="res_multistep"):
         sampler = comfy.samplers.KSAMPLER(sample_resumable, {
             "checkpoint_path": str(Path(checkpoint_directory) / "sampler.pt"),
+            "sampler_name": sampler_name,
         })
         result = nodes_custom_sampler.SamplerCustomAdvanced.execute(
             noise, guider, sampler, sigmas, latent_image)
@@ -174,6 +242,7 @@ class GenVideoResumableSampler:
 
 
 NODE_CLASS_MAPPINGS = {
+    "GenVideoMiniMaxH3ReferenceConditioning": GenVideoMiniMaxH3ReferenceConditioning,
     "GenVideoMiniMaxH3Conditioning": GenVideoMiniMaxH3Conditioning,
     "GenVideoLoadConditioning": GenVideoLoadConditioning,
     "GenVideoLoadLatent": GenVideoLoadLatent,

@@ -1,5 +1,5 @@
 const form = document.querySelector("#job-form");
-const promptInputs = [...document.querySelectorAll(".composer textarea")];
+const promptInputs = [...document.querySelectorAll("#base-prompt-fields textarea")];
 const durationInput = document.querySelector("#duration");
 const resolutionInput = document.querySelector("#resolution");
 const aspectRatioInput = document.querySelector("#aspect-ratio");
@@ -29,6 +29,9 @@ const queueCount = document.querySelector("#queue-count");
 const enginePill = document.querySelector("#engine-pill");
 const engineLabel = document.querySelector("#engine-label");
 
+const modelOptions = [...modelInput.options].map(option => option.cloneNode(true));
+const selectedModels = {base: "minimax-h3", ref2va: "minimax-h3-ref2va"};
+let previousMode = "base";
 const cards = new Map();
 let refreshInFlight = false;
 let currentSnapshot = null;
@@ -45,6 +48,15 @@ function selectedMode() {
 function updateMode() {
   const usesImage = selectedMode() === "image";
   imageField.hidden = !usesImage;
+  const refMode = selectedMode() === "ref2va";
+  document.querySelector("#base-prompt-fields").hidden = refMode;
+  document.querySelector("#ref2va-builder").hidden = !refMode;
+  const nextMode = refMode ? "ref2va" : "base";
+  selectedModels[previousMode] = modelInput.value || selectedModels[previousMode];
+  modelInput.replaceChildren(...modelOptions.filter(option => option.value.includes("ref2va") === refMode).map(option => option.cloneNode(true)));
+  modelInput.value = selectedModels[nextMode];
+  previousMode = nextMode;
+  updateModel();
 }
 
 function canvasDimensions() {
@@ -70,7 +82,9 @@ function updateOutputSpecs() {
 
 function updateModel() {
   const hints = {
+    "minimax-h3-ref2va": "Dedicated Ref2VA Q4 model · 20 steps · image, video, and audio references.",
     "minimax-h3": "H3 with the 4-step Turbo LoRA and native stereo audio.",
+    "minimax-h3-larry-v4": "larryvrh’s H3 Turbo v4 with 6 steps and native stereo audio.",
     "minimax-h3-base": "Regular H3 without the Turbo LoRA; 20 steps for maximum base-model quality.",
   };
   modelHint.textContent = hints[modelInput.value] || "MiniMax H3 generation.";
@@ -137,7 +151,7 @@ function jobCard(job) {
   const copy = document.createElement("div");
   const mode = document.createElement("span");
   mode.className = "job-mode";
-  const modeLabel = job.mode === "image" ? "◫ Image to video" : "✦ Text to video";
+  const modeLabel = job.mode === "ref2va" ? "◈ Reference to video" : job.mode === "image" ? "◫ Image to video" : "✦ Text to video";
   const canvas = job.canvas_width && job.canvas_height
     ? `${job.canvas_width}×${job.canvas_height}`
     : `${job.resolution || 512}p ${job.aspect_ratio || "1:1"}`;
@@ -162,6 +176,15 @@ function jobCard(job) {
   }
   card.append(top);
 
+  for (const ref of job.references || []) {
+    const figure = document.createElement("figure"); figure.className = "job-image-prompt";
+    const caption = document.createElement("figcaption"); caption.textContent = `${(ref.labels || []).join(" + ")} · ${ref.name}`;
+    const media = document.createElement(ref.kind === "image" ? "img" : ref.kind);
+    media.className = "reference-preview"; media.src = ref.url;
+    if (ref.kind === "image") media.alt = ref.name;
+    else { media.controls = true; media.preload = "metadata"; }
+    figure.append(caption, media); card.append(figure);
+  }
   for (const frame of frameInputs) {
     if (job[frame.urlKey]) {
       const imagePrompt = document.createElement("figure");
@@ -236,6 +259,13 @@ function jobCard(job) {
     copyButton.textContent = "Copy to form";
     copyButton.addEventListener("click", () => copyToForm(job, copyButton));
     actions.append(copyButton);
+    if (job.status === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", () => jobAction(job.id, "retry", retry));
+      actions.append(retry);
+    }
     const pending = ["running", "queued", "paused"].includes(job.status);
     if (pending) {
       const pause = document.createElement("button");
@@ -410,6 +440,7 @@ async function jobAction(id, action, button, changes) {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
     } : { method: "POST" });
     if (!response.ok) throw new Error(await response.text());
+    if (action === "retry") selectTab("queue");
     await refresh();
   } catch (error) {
     alert(error.message);
@@ -429,16 +460,17 @@ async function copyToForm(job, button) {
       input.dispatchEvent(new Event("input"));
     });
     form.elements.mode.value = job.mode;
+    updateMode();
     modelInput.value = [...modelInput.options].some(option => option.value === job.model) ? job.model : "minimax-h3";
     durationInput.value = String(job.duration_seconds ?? 5);
     resolutionInput.value = String(job.resolution ?? 512);
     aspectRatioInput.value = job.aspect_ratio || "1:1";
     form.elements.priority.value = job.priority || "medium";
-    form.elements.seed.value = job.seed_text || String(job.seed);
     frameInputs.forEach(frame => { frame.input.value = ""; });
     updateMode(); updateModel(); updateOutputSpecs(); updatePreview();
     formError.hidden = true;
-    const missing = [];
+    const missing = job.mode === "ref2va" ? await Ref2VA.restore(job) : [];
+    form.elements.seed.value = job.seed_text || String(job.seed);
     for (const frame of frameInputs) {
       if (job[frame.urlKey]) {
         try {
@@ -463,7 +495,7 @@ async function copyToForm(job, button) {
       formError.hidden = false;
     }
     document.querySelector(".composer").scrollIntoView({ behavior: "smooth", block: "start" });
-    promptInputs[0].focus({ preventScroll: true });
+    if (job.mode !== "ref2va") promptInputs[0].focus({ preventScroll: true });
   } catch (error) {
     alert(error.message);
   } finally {
@@ -483,10 +515,14 @@ form.addEventListener("submit", async event => {
   submitButton.querySelector("span").textContent = "Adding…";
   try {
     const data = new FormData(form);
-    if (selectedMode() === "text") frameInputs.forEach(frame => data.delete(frame.input.name));
+    if (selectedMode() !== "image") frameInputs.forEach(frame => data.delete(frame.input.name));
+    if (selectedMode() === "ref2va") {
+      promptInputs.forEach(input => data.delete(input.name));
+      Ref2VA.append(data);
+    }
     const response = await fetch("/api/jobs", { method: "POST", body: data });
     if (!response.ok) throw new Error(await response.text());
-    promptInputs.forEach(input => {
+    if (selectedMode() !== "ref2va") promptInputs.forEach(input => {
       input.value = "";
       const count = input.nextElementSibling?.querySelector?.(".field-count");
       if (count) count.textContent = "0 / 8000";

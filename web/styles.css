@@ -326,3 +326,24 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
 @media (max-width: 540px) {
   .frame-inputs { grid-template-columns: 1fr; }
 }
+
+/* Guided reference composer */
+.mode-switch { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.builder-help { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.builder-help a { color: var(--accent); }
+#ref2va-builder h3 { margin-top: 26px; }
+.builder-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+.builder-toolbar > .builder-field { flex: 1; min-width: 180px; }
+.builder-button { border: 1px solid var(--line); background: #161c28; color: var(--text); border-radius: 9px; padding: 10px 12px; min-height: 44px; cursor: pointer; }
+.builder-field { display: block; font-size: 12px; color: var(--muted); margin: 14px 0; }
+.builder-field input, .builder-field select, .builder-field textarea { display: block; width: 100%; margin-top: 6px; }
+.builder-field textarea { min-height: 90px; font-size: 13px; }
+.builder-field select[multiple] { min-height: 90px; padding: 8px; }
+.builder-field input, .builder-field select { border: 1px solid var(--line); border-radius: 9px; background: #0b0e15; color: var(--text); padding: 10px; }
+.reference-card { border: 1px solid var(--line); background: #10151e; padding: 14px; border-radius: 12px; margin: 12px 0; min-width: 0; }
+.reference-card input[type=file] { width: 100%; font-size: 12px; }
+.reference-preview { display: block; width: 100%; max-height: 240px; object-fit: contain; border-radius: 9px; margin-top: 10px; }
+.builder-checkbox { display: flex; align-items: center; gap: 10px; font-size: 13px; min-height: 44px; }
+.builder-checkbox input { width: auto; }
+#ref-prompt-preview { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+[hidden] { display: none !important; }

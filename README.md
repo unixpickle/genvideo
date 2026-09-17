@@ -28,6 +28,10 @@ without distortion.
 
 MiniMax H3 Turbo is the default, using the 4-step Turbo LoRA. Select
 **MiniMax H3 Regular (20 steps)** for the regular schedule without the LoRA.
+**MiniMax H3 Turbo v4 — larryvrh (6 steps)** uses
+[`minimax_h3_turbo_v4_step600_ema.safetensors`](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)
+at strength 1.0 with Euler and the simple schedule, matching the six-evaluation
+[arena variant](https://huggingface.co/spaces/multimodalart/h3-acceleration-arena/blob/main/validate/variants.json).
 Set a seed for repeatable generation.
 
 Videos default to 5 seconds. Every integer duration from 3 through 15 seconds
@@ -61,6 +65,8 @@ last reported progress. Pending jobs also expose:
 - **Pause:** stops a running worker or takes a waiting job out of the queue,
   retaining its inputs and checkpoints. Paused jobs stay paused after restart.
 - **Resume:** puts a paused job at the end of its priority's queue.
+- **Retry:** moves a failed job back to the end of its priority's queue with the
+  same settings, seed, images, and saved checkpoints, clearing its previous error.
 - **Cancel:** kills an active job and deletes its record, input image, output,
   checkpoints, and temporary files. Completed or failed jobs have Remove instead.
 
@@ -88,7 +94,7 @@ until the corresponding job is removed.
 ## Local inference runtime
 
 The local stack uses a 10.6 GB Q4 GGUF of the H3 hybrid FL2VA/REF2VA
-checkpoint, an NVFP4 Qwen3-VL encoder, and a 4-step Turbo LoRA. Its weights are
+checkpoint, an NVFP4 Qwen3-VL encoder, and selectable Turbo LoRAs. Its weights are
 stored outside the repository under
 `/Volumes/MLData3/genvideo/ComfyUI/models/` and linked into the matching
 ComfyUI model directories.
@@ -104,12 +110,27 @@ text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
 vae/minimax_h3_video_vae_fp16.safetensors
 vae/minimax_h3_audio_vae_fp32.safetensors
 loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors
+loras/minimax_h3_turbo_v4_step600_ema.safetensors
 ```
+
+The larryvrh option requires
+[`ComfyUI-MiniMax-H3-Turbo`](https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo)
+(installed revision `4274783a23afcfdbea3b4876cb79effd6c510785`) for its LoRA loader.
+The extension and its bundled tensor data live in
+`/Volumes/MLData3/genvideo/ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-Turbo`, symlinked
+into `ComfyUI/custom_nodes/`. The LoRA uses the author's default runtime bypass
+mode. Our installed ComfyUI handles the audio/video schedules natively through
+`ModelSamplingAV`, so the author's sampler is equivalent to Euler; the app's
+resumable Euler implementation keeps pause, preemption, and retry working.
+
+The v4 EMA download is pinned to Hugging Face revision
+`43a74557ac3f6539db8e0f2a959d03feb7a81480` (779,849,816 bytes), with SHA-256
+`5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3`.
 
 Each job launches its own local ComfyUI instance with low-memory settings and
 stops if its process tree reaches 56 GiB RSS. Set the web server's
 `--memory-limit-gib GIB` option to adjust the limit; values above 64 are rejected.
-The worker also preserves an 8 GiB system-memory reserve and stops if a
+The worker also preserves a 2 GiB system-memory reserve and stops if a
 generation grows swap usage by more than 4 GiB.
 MiniMax H3 uses ComfyUI's dynamic low-memory loading and keeps offloaded model
 weights disk-backed instead of pinning another copy in unified memory.
@@ -128,3 +149,63 @@ Run the tests with the installed inference environment:
 The tests compare interrupted/resumed sampling at every step of the 4- and
 20-step schedules against the installed ComfyUI solver, and exercise priority
 scheduling and process termination with real lightweight subprocesses.
+
+## Ref2VA prompt builder
+
+Choose **Ref2VA** in the generation mode tabs. This tab only offers the dedicated
+**MiniMax H3 Ref2VA Q4 (20 steps)** model; the text/image tabs keep their own model
+selection. Ref2VA uses the regular schedule with no FL2VA Turbo LoRA.
+
+1. Add a task template: character/scene reference, first/last frames, storyboard,
+   video editing, video continuation, appearance/motion transfer, reference voice,
+   or reused soundtrack. Templates can be combined with additional media.
+2. Attach images, videos, and audio; describe their roles and retention relationships.
+   Video soundtracks are opt-in. Labels follow the runtime order: pictures, videos
+   with enabled soundtracks, then standalone audio. Audio numbering is independent
+   of video numbering.
+3. Define subjects and select their source assets. Multiple subjects can share one
+   asset, and one subject can combine several assets. Describe shots, cut times,
+   camera motion, and sound. The dialogue helper inserts speaker IDs and language
+   tags; the reference picker inserts labels into shots.
+4. Build the six prompt sections, review/edit them, then add the job to the queue.
+   Rebuilding replaces manual section edits. Builder changes require rebuilding
+   before submission so a changed attachment cannot silently reuse stale labels.
+   The compiled prompt uses the ordering and relationship markers from the
+   [MiniMax reference guide](https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/ref-en.txt).
+   Describe each shot in English, retaining the original language for dialogue.
+
+Reference limits: 9 images, 3 videos, 3 audio tracks (including enabled video
+soundtracks), and 12 files total. Clips must be 2–15 seconds, with at most 15 seconds
+of video and 15 seconds of audio. Images are limited to 32 MB / 40 megapixels;
+video/audio files to 256 MB each. Videos are decoded at 24 fps and reference frames
+past the generated clip length are omitted by the installed ComfyUI pipeline.
+Images retain their aspect ratio and are scaled to the output pixel budget.
+The model interprets frame anchors, editing, and audio reuse through conditioning;
+these are generative instructions, not a promise of pixel-exact editing or lossless
+soundtrack copying. The six sections together allow 24,000 characters.
+
+Reference uploads, the builder, and the edited prompt survive queue restarts,
+**Copy to form**, regeneration, retry, and pause/resume. Removing a job removes its
+own reference copies. Ref2VA conditioning releases the text encoder before diffusion
+and uses the same memory limits and checkpoint mechanism as other jobs.
+
+The dedicated 10.60 GiB Q4 model is installed at:
+
+```text
+/Volumes/MLData3/genvideo/ComfyUI/models/unet/minimax_h3_ref2va_pruned-Q4_K.gguf
+```
+
+It is linked into `ComfyUI/models/unet/` and shares the existing Qwen encoder and
+video/audio VAEs. To reproduce installation:
+
+```sh
+.venv/bin/python scripts/install_ref2va.py
+```
+
+The installer uses [Unsloth's Ref2VA quantization](https://huggingface.co/unsloth/MiniMax-H3-GGUF)
+at revision `d629413c2e5b51b38c453668b75ca3b06ca92703`. The upstream download is
+11,381,096,544 bytes, SHA-256
+`2fa5840021cf6967843eaeefde9aaa277e540de02986d5ee3d5b0e6a7a8c9dec`.
+The installer adds `general.architecture = minimax_h3` to the metadata-free upstream
+GGUF for the installed ComfyUI-GGUF loader, preserving tensor data and quantization.
+The installed file therefore has a different checksum from the upstream download.

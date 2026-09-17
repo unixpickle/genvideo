@@ -1,4 +1,4 @@
-"""Durable state for H3's deterministic res_multistep sampler.
+"""Durable state for H3's deterministic res_multistep and Euler samplers.
 
 Keep the full schedule and multistep history: restarting a sliced schedule with
 only the latent would silently change the second-order solver's trajectory.
@@ -30,7 +30,9 @@ def load_state(path):
 
 @torch.no_grad()
 def sample_resumable(model, x, sigmas, extra_args=None, callback=None,
-                     disable=None, *, checkpoint_path):
+                     disable=None, *, checkpoint_path, sampler_name="res_multistep"):
+    if sampler_name not in {"res_multistep", "euler"}:
+        raise ValueError(f"Unsupported checkpoint sampler: {sampler_name}")
     path = Path(checkpoint_path)
     extra_args = extra_args or {}
     start = 0
@@ -39,6 +41,8 @@ def sample_resumable(model, x, sigmas, extra_args=None, callback=None,
         state = load_state(path)
         if state["version"] != 1 or not torch.equal(state["sigmas"], sigmas.cpu()):
             raise ValueError("Checkpoint sampler schedule does not match this job")
+        if state.get("sampler_name", "res_multistep") != sampler_name:
+            raise ValueError("Checkpoint sampler does not match this job")
         if state["x"].shape != x.shape:
             raise ValueError("Checkpoint latent shape does not match this job")
         start = state["step"]
@@ -52,7 +56,7 @@ def sample_resumable(model, x, sigmas, extra_args=None, callback=None,
     for i in range(start, len(sigmas) - 1):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         sigma_down = sigmas[i + 1]  # res_multistep uses eta=0, no added noise.
-        if sigma_down == 0 or old_denoised is None:
+        if sampler_name == "euler" or sigma_down == 0 or old_denoised is None:
             d = (x - denoised) / sigmas[i]
             x = x + d * (sigma_down - sigmas[i])
         else:
@@ -68,7 +72,8 @@ def sample_resumable(model, x, sigmas, extra_args=None, callback=None,
             b2 = torch.nan_to_num(phi2 / c2, nan=0.0)
             x = (-h).exp() * x + h * (b1 * denoised + b2 * old_denoised)
         old_denoised, old_sigma_down = denoised, sigma_down
-        atomic_save({"version": 1, "step": i + 1, "sigmas": sigmas.cpu(),
+        atomic_save({"version": 1, "sampler_name": sampler_name,
+                     "step": i + 1, "sigmas": sigmas.cpu(),
                      "x": x.cpu(), "old_denoised": denoised.cpu()}, path)
         if callback is not None:
             callback({"x": x, "i": i, "sigma": sigmas[i],

@@ -15,6 +15,22 @@ import web as queue_web
 
 
 class APITests(unittest.IsolatedAsyncioTestCase):
+    async def test_larry_v4_model_submission_persistence_and_regeneration(self):
+        model = "minimax-h3-larry-v4"
+        response = await self.client.post("/api/jobs", data={"prompt": "A bird", "model": model})
+        self.assertEqual(response.status, 201, await response.text())
+        job = await response.json()
+        self.assertEqual(job["model"], model)
+        self.assertIn("larryvrh", job["model_label"])
+        restored = queue_web.QueueManager(Path(self.temporary.name), 56)
+        restored._load_state()
+        self.assertEqual(restored.jobs[job["id"]].model, model)
+        response = await self.client.post(f'/api/jobs/{job["id"]}/regenerate')
+        self.assertEqual(response.status, 201)
+        self.assertEqual((await response.json())["model"], model)
+        html = await (await self.client.get("/")).text()
+        self.assertIn(f'value="{model}"', html)
+
     async def test_frame_combinations_survive_restart_regenerate_and_removal(self):
         for first, last in ((True, False), (False, True), (True, True)):
             with self.subTest(first=first, last=last):
@@ -126,6 +142,71 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual((await self.client.get(job["image_prompt_url"])).status, 404)
         self.assertEqual((await (await self.client.get("/api/jobs")).json())["jobs"], [])
+
+    async def test_retry_preserves_job_inputs_and_checkpoints_across_restart(self):
+        data = aiohttp.FormData()
+        for key, value in {"mode": "image", "prompt": "A bird lands.",
+                           "seed": "4611686018427388027", "priority": "low"}.items():
+            data.add_field(key, value)
+        for field in ("image", "last_image"):
+            data.add_field(field, field.encode(), filename="frame.png", content_type="image/png")
+        response = await self.client.post("/api/jobs", data=data)
+        original = await response.json()
+        manager = self.client.server.app[queue_web.MANAGER_KEY]
+        job = manager.jobs[original["id"]]
+        job.status, job.error = "failed", "memory safety reserve breached"
+        job.started_at, job.finished_at = 1.0, 2.0
+        job.progress = {"stage": "Diffusion", "step": 2, "total": 4}
+        directory = manager.work_directory / job.id
+        directory.mkdir()
+        checkpoint = directory / "sampler.pt"
+        checkpoint.write_bytes(b"saved checkpoint")
+        peer_response = await self.client.post("/api/jobs", data={"prompt": "Another bird", "priority": "low"})
+        peer = await peer_response.json()
+        manager.wake.clear()
+
+        response = await self.client.post(f"/api/jobs/{job.id}/retry")
+        self.assertEqual(response.status, 200, await response.text())
+        retried = await response.json()
+        self.assertEqual(retried["status"], "queued")
+        for key in ("id", "prompt", "structured_prompt", "seed_text", "model", "mode",
+                    "duration_seconds", "resolution", "aspect_ratio", "priority",
+                    "image_prompt_url", "last_image_prompt_url", "created_at"):
+            self.assertEqual(retried[key], original[key], key)
+        for key in ("error", "started_at", "finished_at"):
+            self.assertIsNone(retried[key])
+        self.assertEqual(retried["progress"], {})
+        self.assertTrue(manager.wake.is_set())
+        self.assertEqual([item.id for item in manager._queued()], [peer["id"], job.id])
+        self.assertEqual(checkpoint.read_bytes(), b"saved checkpoint")
+        for key, expected in (("image_prompt_url", b"image"), ("last_image_prompt_url", b"last_image")):
+            self.assertEqual(await (await self.client.get(retried[key])).read(), expected)
+        restored = queue_web.QueueManager(manager.output_directory, 56)
+        restored._load_state()
+        self.assertEqual(restored.jobs[job.id].as_dict(), retried)
+        self.assertEqual(len(restored.jobs), 2)
+
+    async def test_retry_rejects_nonfailed_legacy_and_missing_image_jobs(self):
+        response = await self.client.post("/api/jobs", data={"prompt": "A bird"})
+        job_id = (await response.json())["id"]
+        manager = self.client.server.app[queue_web.MANAGER_KEY]
+        job = manager.jobs[job_id]
+        endpoint = f"/api/jobs/{job_id}/retry"
+        for status in ("queued", "running", "paused", "completed"):
+            job.status = status
+            self.assertEqual((await self.client.post(endpoint)).status, 409)
+            self.assertEqual(job.status, status)
+        job.status = "failed"
+        job.model = "ltx-2.5"
+        self.assertEqual((await self.client.post(endpoint)).status, 409)
+        job.model = "minimax-h3"
+        job.mode = "image"
+        for paths in ((None, None), (None, manager.upload_directory / "missing"),
+                      (manager.upload_directory / "missing", None)):
+            job.upload_path, job.last_upload_path = paths
+            self.assertEqual((await self.client.post(endpoint)).status, 409)
+            self.assertEqual(job.status, "failed")
+        self.assertEqual((await self.client.post("/api/jobs/missing/retry")).status, 404)
 
     async def test_invalid_priorities_and_edits_return_client_errors(self):
         response = await self.client.post("/api/jobs", data={"prompt": "A bird", "priority": "urgent"})

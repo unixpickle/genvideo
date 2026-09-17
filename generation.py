@@ -23,24 +23,29 @@ from typing import Any, Callable
 
 import aiohttp
 import psutil
+from ref2va import REF2VA_MODEL, REF2VA_WEIGHTS
 
 
 ROOT = Path(__file__).resolve().parent
 COMFY_DIR = ROOT / "ComfyUI"
 COMFY_PYTHON = ROOT / ".venv" / "bin" / "python"
 DEFAULT_MODEL = "minimax-h3"
-SUPPORTED_MODELS = ("minimax-h3", "minimax-h3-base")
+SUPPORTED_MODELS = ("minimax-h3", "minimax-h3-larry-v4", "minimax-h3-base", REF2VA_MODEL)
 MODEL_LABELS = {
+    REF2VA_MODEL: "MiniMax H3 Ref2VA Q4 (20 steps)",
     "minimax-h3": "MiniMax H3 Turbo",
+    "minimax-h3-larry-v4": "MiniMax H3 Turbo v4 (larryvrh, 6 steps)",
     "minimax-h3-base": "MiniMax H3 Regular",
 }
 WORKFLOW_PATHS = {
+    REF2VA_MODEL: ROOT / "workflows" / "minimax_h3_video_api.json",
     "minimax-h3": ROOT / "workflows" / "minimax_h3_video_api.json",
+    "minimax-h3-larry-v4": ROOT / "workflows" / "minimax_h3_video_api.json",
     "minimax-h3-base": ROOT / "workflows" / "minimax_h3_video_api.json",
 }
 HARD_MEMORY_CEILING_GIB = 64.0
 MAX_SWAP_GROWTH_GIB = 4.0
-MIN_SYSTEM_AVAILABLE_GIB = 8.0
+MIN_SYSTEM_AVAILABLE_GIB = 2.0
 DEFAULT_DURATION_SECONDS = 5
 SUPPORTED_DURATION_SECONDS = tuple(range(3, 16))
 DEFAULT_RESOLUTION = 512
@@ -53,7 +58,9 @@ PROGRESS_NODE_CLASSES = {
     "CLIPLoader",
     "CreateVideo",
     "LoraLoaderModelOnly",
+    "MiniMaxH3TurboLoRA",
     "GenVideoMiniMaxH3Conditioning",
+    "GenVideoMiniMaxH3ReferenceConditioning",
     "GenVideoLoadConditioning",
     "GenVideoLoadLatent",
     "GenVideoResumableSampler",
@@ -197,13 +204,14 @@ def _workflow(
     width: int = 512,
     height: int = 512,
     last_image_name: str | None = None,
+    references: list[dict] | None = None,
 ) -> dict[str, Any]:
     if model not in SUPPORTED_MODELS:
         raise GenerationError(f"unsupported model: {model}")
     with WORKFLOW_PATHS[model].open() as workflow_file:
         workflow: dict[str, Any] = json.load(workflow_file)
 
-    if model == "minimax-h3-base":
+    if model in {"minimax-h3-base", "minimax-h3-larry-v4", REF2VA_MODEL}:
         turbo_loras = [
             (node_id, node)
             for node_id, node in workflow.items()
@@ -218,13 +226,29 @@ def _workflow(
         if len(turbo_loras) != 1 or len(schedulers) != 1:
             raise GenerationError("MiniMax H3 workflow has an unexpected Turbo structure")
         turbo_id, turbo_lora = turbo_loras[0]
-        base_model = turbo_lora["inputs"]["model"]
-        for node in workflow.values():
-            for name, value in node["inputs"].items():
-                if value == [turbo_id, 0]:
-                    node["inputs"][name] = list(base_model)
-        del workflow[turbo_id]
-        schedulers[0]["inputs"]["steps"] = 20
+        if model in {"minimax-h3-base", REF2VA_MODEL}:
+            base_model = turbo_lora["inputs"]["model"]
+            for node in workflow.values():
+                for name, value in node["inputs"].items():
+                    if value == [turbo_id, 0]:
+                        node["inputs"][name] = list(base_model)
+            del workflow[turbo_id]
+            schedulers[0]["inputs"]["steps"] = 20
+        else:
+            turbo_lora["class_type"] = "MiniMaxH3TurboLoRA"
+            turbo_lora["inputs"] = {
+                "model": turbo_lora["inputs"]["model"],
+                "lora_name": "minimax_h3_turbo_v4_step600_ema.safetensors",
+                "strength": 1.0,
+                "low_vram": False,
+            }
+            turbo_lora["_meta"] = {"title": "Load larryvrh H3 Turbo v4 LoRA"}
+            schedulers[0]["inputs"]["steps"] = 6
+            for node in workflow.values():
+                if node["class_type"] == "KSamplerSelect":
+                    # Installed ComfyUI's ModelSamplingAV handles both clocks;
+                    # the author's Turbo sampler reduces to Euler on this stack.
+                    node["inputs"]["sampler_name"] = "euler"
 
     load_images = [node for node in workflow.values() if node["class_type"] == "LoadImage"]
     prompts = [
@@ -275,6 +299,16 @@ def _workflow(
     save_videos[0]["inputs"]["filename_prefix"] = filename_prefix
     for offset, node in enumerate(noise_nodes):
         node["inputs"]["noise_seed"] = seed + offset
+    if model == REF2VA_MODEL:
+        if image_name or last_image_name:
+            raise GenerationError("Ref2VA uses reference attachments, not start/end frame inputs")
+        if not references:
+            raise GenerationError("Ref2VA requires reference attachments")
+        workflow["1"]["inputs"]["unet_name"] = REF2VA_WEIGHTS
+        conditioners[0]["class_type"] = "GenVideoMiniMaxH3ReferenceConditioning"
+        conditioners[0]["inputs"].update(audio_vae=["4", 0], references_json=json.dumps(references))
+        conditioners[0]["_meta"] = {"title": "Encode Ref2VA references"}
+        return workflow
     return workflow if image_name is not None or last_image_name is not None else _text_only_graph(workflow)
 
 
@@ -309,7 +343,7 @@ def _resumable_workflow(workflow: dict[str, Any], directory: Path) -> dict[str, 
     directory.mkdir(parents=True, exist_ok=True)
     for node in workflow.values():
         kind = node["class_type"]
-        if kind == "GenVideoMiniMaxH3Conditioning":
+        if kind in {"GenVideoMiniMaxH3Conditioning", "GenVideoMiniMaxH3ReferenceConditioning"}:
             if (directory / "conditioning.pt").is_file():
                 node["class_type"] = "GenVideoLoadConditioning"
                 node["inputs"] = {}
@@ -322,7 +356,8 @@ def _resumable_workflow(workflow: dict[str, Any], directory: Path) -> dict[str, 
                 node["_meta"] = {"title": "Restore generated latents"}
             else:
                 node["class_type"] = "GenVideoResumableSampler"
-                node["inputs"].pop("sampler")
+                sampler_id, _ = node["inputs"].pop("sampler")
+                node["inputs"]["sampler_name"] = workflow[sampler_id]["inputs"]["sampler_name"]
             node["inputs"]["checkpoint_directory"] = str(directory)
     reachable = set()
     pending = [key for key, node in workflow.items() if node["class_type"] == "SaveVideo"]
@@ -751,6 +786,7 @@ class ComfySession:
         *,
         image: Path | None = None,
         last_image: Path | None = None,
+        references: list[dict] | None = None,
         seed: int | None = None,
         duration_seconds: int = DEFAULT_DURATION_SECONDS,
         model: str = DEFAULT_MODEL,
@@ -814,6 +850,7 @@ class ComfySession:
                 model=model,
                 width=width,
                 height=height,
+                references=references,
             )
             if checkpoint_directory is not None:
                 workflow = _resumable_workflow(workflow, checkpoint_directory)

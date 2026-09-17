@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#0b0d12">
     <title>Genvideo Queue</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=11">
-    <script src="/assets/app.js?v=11" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=15">
+    <script src="/assets/ref2va.js?v=15" defer></script>
+    <script src="/assets/app.js?v=15" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -44,17 +45,24 @@
               <input type="radio" name="mode" value="image">
               <span>Use images</span>
             </label>
+            <label>
+              <input type="radio" name="mode" value="ref2va">
+              <span>Ref2VA</span>
+            </label>
           </fieldset>
 
           <div class="model-field">
             <label class="field-label" for="model">Model</label>
             <select id="model" name="model">
               <option value="minimax-h3" selected>MiniMax H3 Turbo (4 steps)</option>
+              <option value="minimax-h3-larry-v4">MiniMax H3 Turbo v4 — larryvrh (6 steps)</option>
+              <option value="minimax-h3-ref2va">MiniMax H3 Ref2VA Q4 (20 steps)</option>
               <option value="minimax-h3-base">MiniMax H3 Regular (20 steps)</option>
             </select>
             <p id="model-hint">H3 with the 4-step Turbo LoRA and native stereo audio.</p>
           </div>
 
+          <div id="base-prompt-fields">
           <label class="field-label" for="integrated-multimodal-description">Integrated multimodal description <span>optional</span></label>
           <textarea id="integrated-multimodal-description" name="integrated_multimodal_description" maxlength="8000"
             placeholder="[Shot 1] Live-action, a close shot frames a glass hummingbird as it takes flight..."></textarea>
@@ -90,6 +98,9 @@
 
             <p class="structured-note">Fill at least one prompt field. Fields are serialized in H3's required order. Image mode automatically aligns the supplied images with the first and/or last frame. With both images, <code>&lt;Picture 1&gt;</code> is the start and <code>&lt;Picture 2&gt;</code> is the end; with one image, it is <code>&lt;Picture 1&gt;</code>.</p>
           </div>
+
+          </div>
+          <div id="ref2va-builder" hidden></div>
 
           <div id="image-field" class="image-field" hidden>
             <p class="frame-help">Choose a start frame, an end frame, or both.</p>
